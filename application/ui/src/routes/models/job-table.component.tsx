@@ -116,7 +116,7 @@ export const TrainingRow = ({
                         </Button>
                     )}
                 </View>
-                <View>
+                <View justifySelf={'end'}>
                     <JobMenu trainJob={trainJob} onViewLogs={onViewLogs} />
                 </View>
             </Grid>
