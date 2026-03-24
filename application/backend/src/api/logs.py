@@ -19,7 +19,7 @@ from sse_starlette import EventSourceResponse
 
 from api.dependencies import get_log_service
 from schemas.logs import LogSource
-from services import LogService
+from services.log_service import LogService
 
 router = APIRouter(prefix="/api/logs", tags=["Logs"])
 

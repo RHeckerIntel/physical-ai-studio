@@ -11,8 +11,6 @@ from services import (
     DatasetDownloadService,
     DatasetService,
     EpisodeThumbnailService,
-    JobService,
-    LogService,
     ModelService,
     ProjectCameraService,
     ProjectService,
@@ -20,6 +18,8 @@ from services import (
 )
 from services.environment_service import EnvironmentService
 from services.event_processor import EventProcessor
+from services.job_service import JobService
+from services.log_service import LogService
 from services.robot_calibration_service import RobotCalibrationService
 from settings import get_settings
 from utils.serial_robot_tools import RobotConnectionManager
