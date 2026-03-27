@@ -154,11 +154,11 @@ class SmolVLAPreprocessor(torch.nn.Module):
         batch_img_keys = Observation.get_flattened_keys(batch, IMAGES)
         available_keys = [key for key in batch_img_keys if "is_pad" not in key]
 
-        batch_img_keys = ["images.camera1", "images.camera2", "images.camera3"]
+        model_image_keys = ["images.camera1", "images.camera2", "images.camera3"]
 
         max_image_dim = 5
-        for key in available_keys:
-            if key not in batch_img_keys:
+        for key in model_image_keys:
+            if key not in available_keys:
                 continue
 
             img = batch[key][:, -1, :, :, :] if batch[key].ndim == max_image_dim else batch[key]
