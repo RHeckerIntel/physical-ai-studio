@@ -1,11 +1,13 @@
 import asyncio
 import multiprocessing as mp
 import queue
+from pathlib import Path
 import time
 from multiprocessing.synchronize import Event as EventClass
 
 from loguru import logger
 from physicalai.inference import InferenceModel
+from physicalai.policies import SmolVLA
 
 from control.inference_result import InferenceResult
 from models.utils import load_inference_model
@@ -19,7 +21,7 @@ class ModelWorker(BaseProcessWorker):
 
     backend: str
     model: Model
-    inference_model: InferenceModel
+    inference_model: SmolVLA
     observation_queue: mp.Queue
     output_queue: mp.Queue
     model_loaded_event: EventClass
@@ -35,7 +37,8 @@ class ModelWorker(BaseProcessWorker):
 
     async def setup(self) -> None:
         """Load model."""
-        self.inference_model = load_inference_model(self.model, backend=self.backend)
+        #self.inference_model = load_inference_model(self.model, backend=self.backend)
+        self.inference_model = SmolVLA.load_from_checkpoint(Path(self.model.path) / "model.ckpt")
         logger.info("Model loaded.")
         self.model_loaded_event.set()
 
@@ -55,7 +58,7 @@ class ModelWorker(BaseProcessWorker):
                 observation = self.observation_queue.get(timeout=1)
                 start_time = time.perf_counter()
                 # batch size is 1, so taking first batch 0
-                output = self.inference_model.select_action(observation)[0]
+                output = self.inference_model.predict_action_chunk(observation.to_torch("cuda"))[0].detach().cpu().numpy()
                 end_time = time.perf_counter()
                 elapsed_time = end_time - start_time
                 logger.debug(f"Inference: ({elapsed_time}): {output.shape}")

@@ -35,7 +35,7 @@ class SyncMixedModelIntegration:
             self.queue_mixer.add(inference_result.data, offset)
             self.queue_mixer.lerp_duration = max(offset, 1)  # inference time should be a good guide for now.
 
-        if not self.inference_poller.busy:
+        if self.queue_mixer.empty() and not self.inference_poller.busy:
             self.inference_poller.run_inference(observation)
 
         if not self.queue_mixer.empty():
