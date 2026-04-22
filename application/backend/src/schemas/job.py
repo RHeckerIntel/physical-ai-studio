@@ -58,6 +58,7 @@ class TrainJobPayload(BaseModel):
         default=False, description="Run batch-size finder before training (power scaling)"
     )
     base_model_id: UUID | None = Field(default=None, description="Model ID to resume training from")
+    result_model_id: UUID | None = Field(default=None, description="ID of new Model")
     val_split: float = Field(
         default=0.1,
         ge=0.0,

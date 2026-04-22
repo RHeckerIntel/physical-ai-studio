@@ -1,7 +1,7 @@
 import { Heading, Item, TabList, TabPanels, Tabs, View } from '@geti-ui/ui';
 
 import { SchemaTrainJob } from '../../api/openapi-spec';
-import { JobMetricsContent } from './metrics';
+import { MetricsContent } from './metrics';
 
 import classes from './model-row-content.module.scss';
 
@@ -19,7 +19,7 @@ export const JobRowContent = ({ job }: JobRowContentProps) => {
                 </TabList>
                 <TabPanels>
                     <Item key='metrics'>
-                        <JobMetricsContent jobId={job.id!} />
+                        {job.payload.result_model_id && <MetricsContent modelId={job.payload.result_model_id} />}
                     </Item>
                     <Item key='datasets'>
                         <Heading>Coming soon</Heading>

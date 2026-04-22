@@ -1,11 +1,16 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import ConfigDict
+from enum import StrEnum
 
 from schemas.base import BaseIDModel, Field
 
+class ModelTrainingStatus(StrEnum):
+    ERROR = "error"
+    DONE = "done"
+    TRAINING = "training"
 
 class Model(BaseIDModel):
     name: str
@@ -19,6 +24,7 @@ class Model(BaseIDModel):
     parent_model_id: UUID | None = Field(None, description="Parent model this was retrained from")
     version: int = Field(1, description="Model version, incremented on each retrain")
     created_at: datetime | None = Field(None)
+    training_status: ModelTrainingStatus = ModelTrainingStatus.TRAINING  # type: ignore[valid-type]
 
     model_config = ConfigDict(
         json_schema_extra={

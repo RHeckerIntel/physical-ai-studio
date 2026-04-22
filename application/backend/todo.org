@@ -1,0 +1,9 @@
+#+title: Todo opens
+*** TODO Implement model graphs
+*** DONE Remove entire folder on model delete
+*** TODO Move Robot control to separate Process
+*** DONE Check why the model worker is hanging on longer
+*** TODO Check why training worker is not saving directly, only on close
+Looks like its hanging or something...
+*** TODO Act seems to not be training.
+*** DONE Check why the model training form auto starts

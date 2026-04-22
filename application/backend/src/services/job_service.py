@@ -1,5 +1,5 @@
 import datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.exc import IntegrityError
 
@@ -53,6 +53,9 @@ class JobService:
                 device_type=payload.device.type,
                 supported=SystemService.supported_training_device_types(),
             )
+
+        if payload.result_model_id is None:
+            payload.result_model_id = uuid4()
 
         async with get_async_db_session_ctx() as session:
             repo = JobRepository(session)

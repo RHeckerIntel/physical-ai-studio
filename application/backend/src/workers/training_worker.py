@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from schemas.model import ModelTrainingStatus
+
 import asyncio
 import shutil
 from pathlib import Path
@@ -63,7 +65,7 @@ class TrainingWorker(BaseProcessWorker):
             if job is not None:
                 with job_logging_ctx(job_id=str(job.id)):
                     payload = TrainJobPayload.model_validate(job.payload)
-                    id = uuid4()
+                    id = uuid4() if payload.result_model_id is None else payload.result_model_id
 
                     base_model = None
                     if payload.base_model_id is not None:
@@ -87,6 +89,7 @@ class TrainingWorker(BaseProcessWorker):
                         parent_model_id=payload.base_model_id,
                         version=base_model.version + 1 if base_model else 1,
                         created_at=None,
+                        training_status=ModelTrainingStatus.TRAINING,
                     )
 
                     self.interrupt_event.clear()
@@ -113,9 +116,9 @@ class TrainingWorker(BaseProcessWorker):
             event_queue=self.queue,
             interrupt_event=self.interrupt_event,
         )
+        model = await ModelService.create_model(model)
         try:
             path = Path(model.path)
-            cache_path = settings.cache_dir / str(job.id)
 
             # Resolve training device -- explicit from payload or auto-detected
             device_type = payload.device.type if payload.device else None
@@ -135,13 +138,13 @@ class TrainingWorker(BaseProcessWorker):
                 policy = setup_policy(model)
 
             checkpoint_callback = ModelCheckpoint(
-                dirpath=cache_path,
+                dirpath=path,
                 filename="model",  # filename without suffix
                 save_top_k=1,
                 monitor="val/loss",
                 mode="min",
             )
-            csv_logger = CSVLogger(cache_path.parent, name=cache_path.stem)
+            csv_logger = CSVLogger(path.parent, name=path.stem)
 
             trainer = Trainer(
                 logger=csv_logger,
@@ -165,9 +168,6 @@ class TrainingWorker(BaseProcessWorker):
             dispatcher.start()
             trainer.fit(model=policy, datamodule=l_dm)
 
-            moved = shutil.move(cache_path, path.parent)
-            Path(moved).rename(path)
-
             for backend in settings.supported_backends:
                 export_dir = path / "exports" / backend
                 if isinstance(policy, ExportablePolicyMixin):
@@ -176,10 +176,13 @@ class TrainingWorker(BaseProcessWorker):
             job = await JobService.update_job_status(
                 job_id=job.id, status=JobStatus.COMPLETED, message="Training finished"
             )
-            model = await ModelService.create_model(model)
+            model = await ModelService.update_model(model, {"training_status": ModelTrainingStatus.DONE})
             self.queue.put((EventType.MODEL_UPDATE, model))
+
         except Exception as e:
             logger.exception(f"Training failed: {e}")
+            model = await ModelService.update_model(model, {"training_status": ModelTrainingStatus.ERROR})
+            self.queue.put((EventType.MODEL_UPDATE, model))
             job = await JobService.update_job_status(
                 job_id=job.id, status=JobStatus.FAILED, message=f"Training failed: {e}"
             )
