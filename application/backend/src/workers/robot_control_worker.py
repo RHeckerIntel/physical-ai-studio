@@ -154,7 +154,6 @@ class RobotControlWorker(BaseProcessWorker):
     def load_environment(self, environment: EnvironmentWithRelations) -> None:
         """Setup environment."""
         try:
-            logger.info(f"load environment: {environment}")
             self.environment_integration = EnvironmentIntegration(
                 environment=environment, robot_client_factory=self.robot_client_factory
             )
@@ -185,7 +184,6 @@ class RobotControlWorker(BaseProcessWorker):
             self.start_episode_t = time.perf_counter()
             dataset_record_t = time.perf_counter()
 
-            logger.info("start loop")
             while not self.should_stop() and not self.events.interrupt.is_set():
                 if not self.input_queue.empty():
                     data = self.input_queue.get_nowait()
@@ -220,7 +218,7 @@ class RobotControlWorker(BaseProcessWorker):
                         match self.state.follower_source:
                             case "teleoperation":
                                 actions = await self.environment_integration.set_follower_position_from_leader(
-                                    dataset_record_time * 3
+                                    dataset_record_time
                                 )
                             case "model":
                                 if self.model_integration:
@@ -234,7 +232,6 @@ class RobotControlWorker(BaseProcessWorker):
                                         await self.environment_integration.set_joints_state(actions, dataset_record_time * 3)
 
                         if since_dataset_record_t > dataset_record_time:
-                            #logger.info("Dataset record moment")
                             if (
                                 self.state.is_recording
                                 and self.ready_for_recording
@@ -249,12 +246,12 @@ class RobotControlWorker(BaseProcessWorker):
                                 self.recording_mutation.add_frame(dataset_observation, actions, self.state.task)
                             self._report_observation(report_observation)
                 dt_s = time.perf_counter() - start_loop_t
-                wait_time = goal_time - dt_s
+                #wait_time = goal_time - dt_s
 
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
-                else:
-                    await asyncio.sleep(0)
+                #if wait_time > 0:
+                #    await asyncio.sleep(wait_time)
+                #else:
+                await asyncio.sleep(0.01)
         except Exception as e:
             logger.exception(f"RobotControl loop error: {e}")
             self._report_error(e)
@@ -284,9 +281,7 @@ class RobotControlWorker(BaseProcessWorker):
                 self._pending_backend = None
 
     async def _handle_setup_environment(self) -> None:
-        logger.info(f"handle environment load {self.events.new_environment.is_set()}")
         if self.environment_integration and self.events.new_environment.is_set():
-            logger.info("handle environment load")
             self.events.new_environment.clear()
             await self.environment_integration.setup()
             self.state.environment_loaded = True

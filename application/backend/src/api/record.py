@@ -52,6 +52,7 @@ async def handle_incoming(websocket: WebSocket, process: RobotControlWorker) -> 
             #    case "disconnect":
             #        process.disconnect()
             #        break
+            await asyncio.sleep(0.05)
     except Exception as e:
         logger.error(f"Incoming task stopped: {e}")
         logger.info("Except: disconnected!")
@@ -82,7 +83,7 @@ async def robot_control_websocket(
 ) -> None:
     """Robot control websocket."""
     await websocket.accept()
-    queue: mp.Queue = mp.Queue()
+    queue: mp.Queue = mp.Queue(maxsize=1)
     process = RobotControlWorker(
         stop_event=scheduler.mp_stop_event,
         robot_client_factory=RobotClientFactory(
@@ -106,7 +107,7 @@ async def robot_control_websocket(
         task.cancel()
 
     if process is not None:
-        process.disconnect()
+        process.input_queue.put_nowait({"event": "disconnect"})
         process.join(10)
 
     queue.close()

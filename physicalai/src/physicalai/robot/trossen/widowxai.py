@@ -64,7 +64,7 @@ class WidowXAI(Robot):
 
     JOINT_ORDER: ClassVar[list[str]] = list(WIDOWXAI_JOINT_ORDER)
     NUM_JOINTS: ClassVar[int] = len(JOINT_ORDER)
-    MAX_RELATIVE_TARGET: ClassVar[float] = 0.25
+    MAX_RELATIVE_TARGET: ClassVar[float] = 0.20
 
     def __init__(self, ip: str, role: Literal["leader", "follower"] = "follower") -> None:
         """Initialize the WidowXAI driver.
@@ -123,7 +123,7 @@ class WidowXAI(Robot):
             )
 
             driver.set_all_modes(trossen_arm.Mode.position)
-            driver.set_all_positions(list(HOME_POSITION), 2.0, True)  # noqa: FBT003
+            driver.set_all_positions(list(HOME_POSITION), 2.0, False)  # noqa: FBT003
 
             if self._role == "leader":
                 # Zero external efforts before homing (essential for leader)
