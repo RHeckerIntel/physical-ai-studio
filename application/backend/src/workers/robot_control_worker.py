@@ -21,7 +21,7 @@ from schemas import Model
 from schemas.dataset import Dataset, Episode
 from schemas.environment import EnvironmentWithRelations
 
-from .base import BaseThreadWorker
+from .base import BaseProcessWorker
 from .model_worker_registry import ModelWorkerRegistry
 
 
@@ -46,18 +46,20 @@ class WorkerEvents:
         self.start_recording_mutation = Event()
 
 
-class RobotControlWorker(BaseThreadWorker):
+class RobotControlWorker(BaseProcessWorker):
     ROLE: str = "RobotControlWorker"
 
     robot_client_factory: RobotClientFactory
 
     queue: Queue
+    input_queue: Queue
     state: RobotControlState
     model_integration: SyncMixedModelIntegration | None = None
     environment_integration: EnvironmentIntegration | None = None
     dataset: DatasetClient | None = None
     recording_mutation: RecordingMutation | None = None
 
+    robot_fps: int = 100
     fps: int = 30
 
     action_keys: list[str] = []
@@ -72,7 +74,8 @@ class RobotControlWorker(BaseThreadWorker):
         robot_client_factory: RobotClientFactory,
         model_worker_registry: ModelWorkerRegistry,
     ):
-        super().__init__(stop_event=stop_event)
+        self.input_queue = Queue()
+        super().__init__(stop_event=stop_event, queues_to_cancel=[self.input_queue])
         self.queue = queue
         self.state = RobotControlState()
         self.robot_client_factory = robot_client_factory
@@ -81,6 +84,29 @@ class RobotControlWorker(BaseThreadWorker):
         self._model_worker_id: UUID | None = None
         self._pending_model: Model | None = None
         self._pending_backend: str | None = None
+
+    def handle_incoming(self, event: str, payload: dict):
+        match event:
+            case "load_environment":
+                self.load_environment(EnvironmentWithRelations.model_validate(payload["environment"]))
+            case "load_model":
+                self.load_model(Model.model_validate(payload["model"]), payload["backend"])
+            case "load_dataset":
+                self.load_dataset(Dataset.model_validate(payload["dataset"]))
+            case "set_follower_source":
+                self.set_follower_source(payload["follower_source"])
+            case "start_recording":
+                self.start_recording(payload["task"])
+            case "save_episode":
+                self.save_episode()
+            case "discard_episode":
+                self.discard_episode()
+            case "start_task":
+                self.start_task(payload["task"])
+            case "stop_task":
+                self.stop()
+            case "disconnect":
+                self.disconnect()
 
     def start_task(self, task: str) -> None:
         if self.state.model_loaded and self.state.environment_loaded:
@@ -128,6 +154,7 @@ class RobotControlWorker(BaseThreadWorker):
     def load_environment(self, environment: EnvironmentWithRelations) -> None:
         """Setup environment."""
         try:
+            logger.info(f"load environment: {environment}")
             self.environment_integration = EnvironmentIntegration(
                 environment=environment, robot_client_factory=self.robot_client_factory
             )
@@ -138,7 +165,7 @@ class RobotControlWorker(BaseThreadWorker):
             self.environment_integration = None
             self._report_error(e)
 
-    def setup(self) -> None:
+    async def setup(self) -> None:
         """Set up robots, cameras and dataset."""
         self._report_state()
 
@@ -156,8 +183,18 @@ class RobotControlWorker(BaseThreadWorker):
         """inference loop."""
         try:
             self.start_episode_t = time.perf_counter()
+            dataset_record_t = time.perf_counter()
 
+            logger.info("start loop")
             while not self.should_stop() and not self.events.interrupt.is_set():
+                if not self.input_queue.empty():
+                    data = self.input_queue.get_nowait()
+                    payload = data.get("data", {})
+                    event = data.get("event", None)
+                    if event:
+                        self.handle_incoming(event, payload)
+
+
                 await asyncio.gather(
                     self._handle_new_model_load(),
                     self._handle_setup_environment(),
@@ -167,8 +204,10 @@ class RobotControlWorker(BaseThreadWorker):
                     self._handle_discard_episode(),
                 )
 
-                goal_time = 1 / self.fps
+                goal_time = 1 / self.robot_fps
+                dataset_record_time = 1 / self.fps
                 start_loop_t = time.perf_counter()
+                since_dataset_record_t = start_loop_t - dataset_record_t
                 if self.environment_integration:
                     observation = await self.environment_integration.get_observation()
                     timestamp = time.perf_counter() - self.start_episode_t
@@ -181,7 +220,7 @@ class RobotControlWorker(BaseThreadWorker):
                         match self.state.follower_source:
                             case "teleoperation":
                                 actions = await self.environment_integration.set_follower_position_from_leader(
-                                    goal_time
+                                    dataset_record_time * 3
                                 )
                             case "model":
                                 if self.model_integration:
@@ -192,20 +231,23 @@ class RobotControlWorker(BaseThreadWorker):
                                     if action is not None:
                                         actions = dict(zip(self.environment_integration.action_keys, action))
                                         report_observation["actions"] = actions
-                                        await self.environment_integration.set_joints_state(actions, goal_time)
+                                        await self.environment_integration.set_joints_state(actions, dataset_record_time * 3)
 
-                        if (
-                            self.state.is_recording
-                            and self.ready_for_recording
-                            and self.state.task
-                            and actions
-                            and self.recording_mutation
-                        ):
-                            dataset_observation = self.environment_integration.format_observation_for_dataset(
-                                observation
-                            )
-                            self.recording_mutation.add_frame(dataset_observation, actions, self.state.task)
-                        self._report_observation(report_observation)
+                        if since_dataset_record_t > dataset_record_time:
+                            #logger.info("Dataset record moment")
+                            if (
+                                self.state.is_recording
+                                and self.ready_for_recording
+                                and self.state.task
+                                and actions
+                                and self.recording_mutation
+                            ):
+                                dataset_record_t = start_loop_t
+                                dataset_observation = self.environment_integration.format_observation_for_dataset(
+                                    observation
+                                )
+                                self.recording_mutation.add_frame(dataset_observation, actions, self.state.task)
+                            self._report_observation(report_observation)
                 dt_s = time.perf_counter() - start_loop_t
                 wait_time = goal_time - dt_s
 
@@ -242,7 +284,9 @@ class RobotControlWorker(BaseThreadWorker):
                 self._pending_backend = None
 
     async def _handle_setup_environment(self) -> None:
+        logger.info(f"handle environment load {self.events.new_environment.is_set()}")
         if self.environment_integration and self.events.new_environment.is_set():
+            logger.info("handle environment load")
             self.events.new_environment.clear()
             await self.environment_integration.setup()
             self.state.environment_loaded = True
