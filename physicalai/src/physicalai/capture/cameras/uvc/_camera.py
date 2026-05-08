@@ -149,6 +149,20 @@ class UVCCamera(Camera):
 
         return discover_uvc()
 
+    @classmethod
+    def query_formats(cls, device_id: str) -> list[tuple[int, int, int]]:
+        """Query supported formats without opening a stream.
+
+        Args:
+            device_id: Device index or unique_id string.
+
+        Returns:
+            Sorted list of ``(width, height, fps)`` tuples.
+        """
+        from ._omnicamera import OmniCamera  # noqa: PLC0415
+
+        return OmniCamera.query_formats(device_id)
+
     # ------------------------------------------------------------------
     # Camera Settings
     # ------------------------------------------------------------------

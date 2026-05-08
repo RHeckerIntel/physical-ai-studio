@@ -20,6 +20,7 @@ import { clsx } from 'clsx';
 import { NavLink, Outlet, useParams } from 'react-router-dom';
 
 import { $api } from '../../api/client';
+import { isRecordingLockedError } from '../../api/errors';
 import { SchemaProjectCamera } from '../../api/types';
 import { useProjectId } from '../../features/projects/use-project';
 import { ConnectionStatus } from '../../features/robots/robots-list';
@@ -45,7 +46,16 @@ const MenuActions = ({ camera_id }: { camera_id: string }) => {
                 selectionMode='single'
                 onAction={(action) => {
                     if (action === 'delete') {
-                        deleteCameraMutation.mutate({ params: { path: { project_id, camera_id } } });
+                        deleteCameraMutation.mutate(
+                            { params: { path: { project_id, camera_id } } },
+                            {
+                                onError: (error) => {
+                                    if (isRecordingLockedError(error)) {
+                                        alert('Cannot delete camera while a recording session is active.');
+                                    }
+                                },
+                            }
+                        );
                     }
                 }}
             >

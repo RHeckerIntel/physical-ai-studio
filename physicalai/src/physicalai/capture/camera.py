@@ -36,10 +36,6 @@ class CameraType(StrEnum):
     BASLER = "basler"
 
 
-# Backward-compat alias — will be removed in a future version.
-Driver = CameraType
-
-
 class Camera(ABC):
     """Abstract interface for live camera hardware.
 
@@ -144,6 +140,11 @@ class Camera(ABC):
         ...
 
     @property
+    def color_mode(self) -> ColorMode:
+        """Pixel format for colour image reads."""
+        return self._color_mode
+
+    @property
     def _executor(self) -> ThreadPoolExecutor:
         """Lazy-initialised per-camera executor for async reads."""
         if self.__executor is None:
@@ -221,6 +222,19 @@ class Camera(ABC):
         Returns:
             Discovered devices, or an empty list if discovery is
             not supported for this camera type.
+        """
+        return []
+
+    @classmethod
+    def query_formats(cls, device_id: str) -> list[tuple[int, int, int]]:  # noqa: ARG003
+        """Query supported formats for a device without opening a stream.
+
+        Args:
+            device_id: Device index, path, or serial number.
+
+        Returns:
+            Sorted list of ``(width, height, fps)`` tuples.
+            Empty list if format discovery is not supported.
         """
         return []
 

@@ -111,3 +111,14 @@ class UploadTooLargeError(BaseException):
             error_code="upload_too_large",
             http_status=http.HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
         )
+
+
+class RecordingLockError(BaseException):
+    """Raised when a camera cannot be modified because it is locked by an active recording session."""
+
+    def __init__(self, message: str = "Camera is in use by an active recording session.") -> None:
+        super().__init__(
+            message=message,
+            error_code="recording_locked",
+            http_status=423,
+        )
