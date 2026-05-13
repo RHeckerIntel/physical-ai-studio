@@ -1,3 +1,5 @@
+from physicalai.inference.runners import SinglePass
+from physicalai.inference.runners.rtc_action_chunking import RTCActionChunking
 import asyncio
 import multiprocessing as mp
 import queue
@@ -50,6 +52,24 @@ class ModelWorker(BaseProcessWorker):
     async def wait_for_loading_to_complete(self) -> None:
         await asyncio.to_thread(self.model_loaded_event.wait)
 
+    def use_rtc(self) -> None:
+        rtc_runner = RTCActionChunking(
+            runner=SinglePass(),
+            chunk_size=50,
+            execution_horizon=10,
+            fps=30,
+            action_dim=32,  # Pi05 internal max_action_dim
+            output_action_dim=7 * 4,  # actual robot DOF
+            queue_threshold=10,
+            action_key="action",
+            model_output_key="actions_out",
+            postprocessors=self.inference_model.postprocessors,
+        )
+        self.inference_model.runner = rtc_runner
+        self.inference_model.postprocessors = []  # RTC runner owns postprocessing now
+        logger.info("RTCActionChunking runner configured (chunk=%d, horizon=%d, fps=%d)", 50, 10, 30)
+
+
     async def run_loop(self) -> None:
         """Idle → load → inference → idle cycle."""
         while not self.should_stop():
@@ -65,6 +85,8 @@ class ModelWorker(BaseProcessWorker):
             _, model, backend = cmd
             logger.info(f"Loading model: {model.name} ({backend})")
             self.inference_model = load_inference_model(model, backend=backend)
+            self.use_rtc()
+
             logger.info("Model loaded.")
             self.model_loaded_event.set()
 
@@ -73,7 +95,8 @@ class ModelWorker(BaseProcessWorker):
                 try:
                     observation = self.observation_queue.get(timeout=1)
                     start_time = time.perf_counter()
-                    output = self.inference_model.predict_action_chunk(observation.to_numpy().to_dict(flatten=False))[0]
+                    output = self.inference_model.select_action(observation.to_numpy().to_dict(flatten=False))
+                    print(output.shape)
                     elapsed_time = time.perf_counter() - start_time
                     logger.debug(f"Inference: ({elapsed_time}): {output.shape}")
                     self.output_queue.put(InferenceResult(time=elapsed_time, data=output))
