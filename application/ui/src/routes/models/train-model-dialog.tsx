@@ -67,12 +67,6 @@ export const MODELS: ReadonlyArray<{
         minVRAM: 8 * GB,
     },
     {
-        id: 'pi0',
-        name: 'Pi0',
-        description: 'Vision-Language-Action model based on PaliGemma 3B',
-        minVRAM: 12 * GB,
-    },
-    {
         id: 'pi05',
         name: 'Pi0.5',
         description: 'Enhanced Pi0 with discrete state encoding and longer context',
