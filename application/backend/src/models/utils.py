@@ -38,6 +38,8 @@ def load_inference_model(model: Model, backend: str) -> InferenceModel:
     inference_device = "auto"
     if backend == "torch":
         inference_device = get_torch_device()
+    elif backend == "openvino":
+        inference_device = "GPU" # Hardcode gpu for our case...
 
     export_dir = Path(model.path) / "exports" / backend
     return InferenceModel(export_dir=export_dir, policy_name=model.policy, backend=backend, device=inference_device)
