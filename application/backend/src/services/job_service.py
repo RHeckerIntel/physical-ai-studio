@@ -76,6 +76,12 @@ class JobService:
             return await repo.get_pending_job_by_type(JobType.TRAINING)
 
     @staticmethod
+    async def create_job(job: Job) -> Job:
+        async with get_async_db_session_ctx() as session:
+            repo = JobRepository(session)
+            return await repo.save(job)
+
+    @staticmethod
     async def update_job_status(
         job_id: UUID,
         status: JobStatus,
