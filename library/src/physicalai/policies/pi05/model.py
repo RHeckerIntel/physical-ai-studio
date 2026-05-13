@@ -1247,9 +1247,9 @@ class Pi05RTCWrapper(nn.Module):
     def forward(
         self,
         images: Tensor,
-        img_masks: Tensor,
-        lang_tokens: Tensor,
-        lang_masks: Tensor,
+        image_masks: Tensor,
+        tokenized_prompt: Tensor,
+        tokenized_prompt_mask: Tensor,
         noise: Tensor,
         prev_chunk_left_over: Tensor,
         inference_delay: Tensor,
@@ -1258,9 +1258,9 @@ class Pi05RTCWrapper(nn.Module):
 
         Args:
             images: ``(num_cameras, batch, C, H, W)`` image stack.
-            img_masks: ``(num_cameras, batch)`` boolean masks.
-            lang_tokens: ``(batch, seq_len)`` tokenized prompt.
-            lang_masks: ``(batch, seq_len)`` prompt attention mask.
+            image_masks: ``(num_cameras, batch)`` boolean masks.
+            tokenized_prompt: ``(batch, seq_len)`` tokenized prompt.
+            tokenized_prompt_mask: ``(batch, seq_len)`` prompt attention mask.
             noise: ``(batch, chunk_size, max_action_dim)`` initial noise.
             prev_chunk_left_over: ``(batch, chunk_size, max_action_dim)``
                 unconsumed actions from the previous chunk.
@@ -1272,13 +1272,13 @@ class Pi05RTCWrapper(nn.Module):
         """
         images = images.float()
         # OV prefers int for CumSum — convert bool masks
-        img_masks = img_masks.long()
-        lang_masks = lang_masks.long()
+        image_masks = image_masks.long()
+        tokenized_prompt_mask = tokenized_prompt_mask.long()
 
         prefix_weights = self._compute_prefix_weights(inference_delay)
 
         actions = self._sample_actions_rtc(
-            images, img_masks, lang_tokens, lang_masks,
+            images, image_masks, tokenized_prompt, tokenized_prompt_mask,
             noise, prev_chunk_left_over, prefix_weights,
         )
 
@@ -1404,9 +1404,9 @@ class Pi05RTCWrapper(nn.Module):
 
         return {
             "images": torch.randn(num_cameras, 1, 3, h, w, device=device, dtype=torch.float32),
-            "img_masks": torch.ones(num_cameras, 1, dtype=torch.bool, device=device),
-            "lang_tokens": torch.randint(0, 256, (1, tokenizer_max_length), device=device, dtype=torch.long),
-            "lang_masks": torch.ones(1, tokenizer_max_length, dtype=torch.bool, device=device),
+            "image_masks": torch.ones(num_cameras, 1, dtype=torch.bool, device=device),
+            "tokenized_prompt": torch.randint(0, 256, (1, tokenizer_max_length), device=device, dtype=torch.long),
+            "tokenized_prompt_mask": torch.ones(1, tokenizer_max_length, dtype=torch.bool, device=device),
             "noise": torch.randn(1, chunk_size, max_action_dim, device=device, dtype=torch.float32),
             "prev_chunk_left_over": torch.randn(
                 1, chunk_size, max_action_dim, device=device, dtype=torch.float32,

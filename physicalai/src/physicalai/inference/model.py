@@ -334,9 +334,12 @@ class InferenceModel:
                     flat_inputs[key] = value
 
             filtered: dict[str, np.ndarray] = {}
+            runner_keys = getattr(self.runner, "runner_provided_keys", set())
             for k in expected:
                 if k in flat_inputs:
                     filtered[k] = flat_inputs[k]
+                elif k in runner_keys:
+                    continue  # runner will inject this
                 else:
                     msg = f"Expected input '{k}' not found in inputs.\nAvailable keys: {list(flat_inputs.keys())}"
                     raise KeyError(msg)
