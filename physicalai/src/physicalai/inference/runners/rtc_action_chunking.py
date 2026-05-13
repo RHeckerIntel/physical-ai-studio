@@ -246,6 +246,9 @@ class RTCActionChunking(InferenceRunner):
                 1, self._chunk_size, self._action_dim,
             ).astype(np.float32)
 
+            # Snapshot cursor before inference for delay cross-check
+            action_index_before = self._queue.get_action_index()
+
             # 5. Run inference and measure latency
             try:
                 t0 = time.perf_counter()
@@ -282,7 +285,10 @@ class RTCActionChunking(InferenceRunner):
             real_delay = int(np.ceil(elapsed * self._fps))
             real_delay = min(real_delay, max(0, len(raw_actions) - self._execution_horizon))
 
-            self._queue.merge(raw_actions, processed_actions, real_delay)
+            self._queue.merge(
+                raw_actions, processed_actions, real_delay,
+                action_index_before_inference=action_index_before,
+            )
             self._first_chunk_ready.set()
 
             logger.debug(
