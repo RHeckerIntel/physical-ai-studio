@@ -16,4 +16,20 @@ TOKENIZED_PROMPT = "tokenized_prompt"
 TOKENIZED_PROMPT_MASK = "tokenized_prompt_mask"
 IMAGE_MASKS = "image_masks"
 
-__all__ = ["ACTION", "IMAGES", "IMAGE_MASKS", "STATE", "TASK", "TOKENIZED_PROMPT", "TOKENIZED_PROMPT_MASK"]
+# RTC-specific keys
+PREV_CHUNK_LEFT_OVER = "prev_chunk_left_over"
+INFERENCE_DELAY = "inference_delay"
+NOISE = "noise"
+
+__all__ = [
+    "ACTION",
+    "IMAGES",
+    "IMAGE_MASKS",
+    "INFERENCE_DELAY",
+    "NOISE",
+    "PREV_CHUNK_LEFT_OVER",
+    "STATE",
+    "TASK",
+    "TOKENIZED_PROMPT",
+    "TOKENIZED_PROMPT_MASK",
+]

@@ -1268,7 +1268,7 @@ class Pi05RTCWrapper(nn.Module):
                 steps (``ceil(latency / frame_time)``).
 
         Returns:
-            Denoised actions ``(batch, chunk_size, max_action_dim)``.
+            Denoised actions ``(batch, chunk_size, original_action_dim)``.
         """
         images = images.float()
         # OV prefers int for CumSum — convert bool masks
@@ -1277,10 +1277,14 @@ class Pi05RTCWrapper(nn.Module):
 
         prefix_weights = self._compute_prefix_weights(inference_delay)
 
-        return self._sample_actions_rtc(
+        actions = self._sample_actions_rtc(
             images, img_masks, lang_tokens, lang_masks,
             noise, prev_chunk_left_over, prefix_weights,
         )
+
+        # Trim padded dims to actual action dimension (same as non-RTC path)
+        original_action_dim = int(self.model._dataset_stats[ACTION]["shape"][-1])  # noqa: SLF001
+        return actions[:, :, :original_action_dim]
 
     @torch.no_grad()
     def _sample_actions_rtc(

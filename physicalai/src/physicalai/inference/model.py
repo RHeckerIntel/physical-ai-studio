@@ -137,9 +137,11 @@ class InferenceModel:
     @property
     def use_action_queue(self) -> bool:
         """Whether action queuing is enabled (backward compat)."""
+        if self.runner.__class__.__name__ in ("ActionChunking", "RTCActionChunking"):
+            return True
         runner_spec = self.manifest.model.runner
         if runner_spec is not None:
-            if runner_spec.type == "action_chunking":
+            if runner_spec.type in ("action_chunking", "rtc_action_chunking"):
                 return True
             if "ActionChunking" in runner_spec.class_path:
                 return True
