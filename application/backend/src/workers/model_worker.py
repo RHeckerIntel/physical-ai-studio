@@ -28,7 +28,7 @@ class ModelWorker(BaseProcessWorker):
 
     def __init__(self, stop_event: EventClass):
         self.command_queue = mp.Queue()
-        self.observation_queue = mp.Queue()
+        self.observation_queue = mp.Queue(maxsize=1)
         self.output_queue = mp.Queue()
         super().__init__(
             stop_event=stop_event,
@@ -57,7 +57,7 @@ class ModelWorker(BaseProcessWorker):
             runner=SinglePass(),
             chunk_size=50,
             execution_horizon=10,
-            fps=30,
+            fps=18,
             action_dim=32,  # Pi05 internal max_action_dim
             output_action_dim=7 * 4,  # actual robot DOF
             queue_threshold=10,
@@ -96,7 +96,6 @@ class ModelWorker(BaseProcessWorker):
                     observation = self.observation_queue.get(timeout=1)
                     start_time = time.perf_counter()
                     output = self.inference_model.select_action(observation.to_numpy().to_dict(flatten=False))
-                    print(output.shape)
                     elapsed_time = time.perf_counter() - start_time
                     logger.debug(f"Inference: ({elapsed_time}): {output.shape}")
                     self.output_queue.put(InferenceResult(time=elapsed_time, data=output))

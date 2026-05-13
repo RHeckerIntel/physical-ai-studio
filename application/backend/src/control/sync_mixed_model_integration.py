@@ -23,23 +23,28 @@ class SyncMixedModelIntegration:
         self.queue_mixer = QueueMixer(lerp_duration=self.fps)
 
     def select_action(self, observation: Observation) -> list[list[float]] | None:
-        if self.inference_poller.has_result():
-            inference_result = self.inference_poller.get_result()
-            offset = int(inference_result.time * self.fps)
-            self.queue_mixer.add(inference_result.data[:25], 0)
-            self.queue_mixer.lerp_duration = max(offset, 1)
+        self.model_worker.observation_queue.put(observation,timeout=10)
+        inference_result =  self.model_worker.output_queue.get(timeout=10)
+        return inference_result.data
+
+
+        #if self.inference_poller.has_result():
+        #    inference_result = self.inference_poller.get_result()
+            #offset = int(inference_result.time * self.fps)
+            #self.queue_mixer.add(inference_result.data[:25], 0)
+            #self.queue_mixer.lerp_duration = max(offset, 1)
 
         # if self.use_synchronous we wait for the queue_mixer to empty first.
         # else just send inference when its no longer busy.
-        synchronous = self.queue_mixer.empty() if self.use_synchronous else True
+        #synchronous = self.queue_mixer.empty() if self.use_synchronous else True
 
-        if synchronous and not self.inference_poller.busy:
-            self.inference_poller.run_inference(observation)
+        #if synchronous and not self.inference_poller.busy:
+        #self.inference_poller.run_inference(observation)
 
-        if not self.queue_mixer.empty():
-            return self.queue_mixer.pop().tolist()
+        #if not self.queue_mixer.empty():
+        #    return self.queue_mixer.pop().tolist()
 
-        return None
+        #return None
 
     def reset(self) -> None:
         self.inference_poller.reset()

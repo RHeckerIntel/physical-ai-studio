@@ -192,7 +192,7 @@ class RobotControlWorker(BaseThreadWorker):
                                     if action is not None:
                                         actions = dict(zip(self.environment_integration.action_keys, action))
                                         report_observation["actions"] = actions
-                                        await self.environment_integration.set_joints_state(actions, goal_time * 3)
+                                        await self.environment_integration.set_joints_state(actions, goal_time * 2)
 
                         if (
                             self.state.is_recording
@@ -205,7 +205,7 @@ class RobotControlWorker(BaseThreadWorker):
                                 observation
                             )
                             self.recording_mutation.add_frame(dataset_observation, actions, self.state.task)
-                        self._report_observation(report_observation)
+                        #self._report_observation(report_observation)
                 dt_s = time.perf_counter() - start_loop_t
                 wait_time = goal_time - dt_s
 
