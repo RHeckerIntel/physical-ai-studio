@@ -48,7 +48,7 @@ capture = [
 ur = []
 abb = []
 franka = []
-trossen = ["trossen-arm>=1.9.0"]
+trossen = ["trossen-arm==1.9.3"]
 so101 = ["feetech-servo-sdk"]
 robots = [
     "physicalai[ur]",

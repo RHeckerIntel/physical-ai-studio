@@ -57,17 +57,22 @@ class ModelWorker(BaseProcessWorker):
             runner=SinglePass(),
             chunk_size=50,
             execution_horizon=10,
-            fps=18,
+            fps=15,
             action_dim=32,  # Pi05 internal max_action_dim
             output_action_dim=7 * 4,  # actual robot DOF
-            queue_threshold=10,
+            queue_threshold=17,
             action_key="action",
             model_output_key="actions_out",
             postprocessors=self.inference_model.postprocessors,
+            use_chunk_steps=25,   # only queue first 25 of 50 predicted actions
+            blend_steps=5,        # set to 0 to disable blending for comparison
         )
         self.inference_model.runner = rtc_runner
         self.inference_model.postprocessors = []  # RTC runner owns postprocessing now
-        logger.info("RTCActionChunking runner configured (chunk=%d, horizon=%d, fps=%d)", 50, 10, 30)
+        logger.info(
+            "RTCActionChunking runner configured (chunk=%d, use=%d, horizon=%d, fps=%.1f, blend=%d)",
+            50, 25, 10, 18, 5,
+        )
 
 
     async def run_loop(self) -> None:

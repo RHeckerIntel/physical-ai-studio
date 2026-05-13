@@ -91,6 +91,7 @@ class RTCActionQueue:
         processed: np.ndarray,
         real_delay: int,
         action_index_before_inference: int | None = None,
+        blend_steps: int = 0,
     ) -> None:
         """Replace queue contents, trimming the first ``real_delay`` actions.
 
@@ -102,6 +103,8 @@ class RTCActionQueue:
             action_index_before_inference: Cursor snapshot taken before
                 inference started. Used to cross-check ``real_delay``
                 against actual consumption.
+            blend_steps: Number of steps to LERP from the old chunk into the
+                new one. 0 disables blending (hard cut, original behaviour).
         """
         with self._lock:
             # Cross-check: compare latency-based delay with actual consumed actions
@@ -125,8 +128,18 @@ class RTCActionQueue:
                     max_len,
                 )
 
+            new_processed = processed[clamped_delay:].copy()
+
+            if blend_steps > 0 and self._processed is not None:
+                old_remaining = self._processed[self._cursor:]
+                n_blend = min(len(old_remaining), len(new_processed), blend_steps)
+                if n_blend > 0:
+                    # weight goes 1→0 (old) / 0→1 (new) over n_blend steps
+                    w = np.linspace(1.0, 0.0, n_blend, dtype=np.float32).reshape(n_blend, 1)
+                    new_processed[:n_blend] = w * old_remaining[:n_blend] + (1.0 - w) * new_processed[:n_blend]
+
             self._original = original[clamped_delay:]
-            self._processed = processed[clamped_delay:]
+            self._processed = new_processed
             self._cursor = 0
 
     def qsize(self) -> int:

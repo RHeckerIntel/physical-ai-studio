@@ -79,6 +79,13 @@ class RTCActionChunking(InferenceRunner):
             the RTC thread (e.g. denormalization). These run in the
             background thread so the queue stores both raw and processed
             actions.
+        use_chunk_steps: Cap how many actions from each predicted chunk are
+            actually queued. ``None`` uses the full ``chunk_size``. Useful
+            when later actions in a long chunk deviate too much from the
+            intended trajectory.
+        blend_steps: Number of control steps over which to LERP from the
+            tail of the outgoing chunk into the incoming one on each merge.
+            0 keeps the original hard-cut behaviour.
     """
 
     def __init__(
@@ -93,6 +100,8 @@ class RTCActionChunking(InferenceRunner):
         action_key: str = ACTION,
         model_output_key: str | None = None,
         postprocessors: list[Postprocessor] | None = None,
+        use_chunk_steps: int | None = None,
+        blend_steps: int = 0,
     ) -> None:
         self._inner = runner
         self._chunk_size = chunk_size
@@ -104,6 +113,8 @@ class RTCActionChunking(InferenceRunner):
         self._action_key = action_key
         self._model_output_key = model_output_key or action_key
         self._postprocessors: list[Postprocessor] = postprocessors or []
+        self._use_chunk_steps = use_chunk_steps
+        self._blend_steps = blend_steps
 
         self._queue = RTCActionQueue()
         self._latency_tracker = LatencyTracker()
@@ -286,6 +297,11 @@ class RTCActionChunking(InferenceRunner):
             # 8. Postprocess (denormalize) for robot
             processed_actions = self._postprocess(sliced_actions)
 
+            # Cap chunk to use_chunk_steps so later, more deviated actions are dropped
+            if self._use_chunk_steps is not None:
+                raw_actions = raw_actions[: self._use_chunk_steps]
+                processed_actions = processed_actions[: self._use_chunk_steps]
+
             # 9. Compute real delay and merge
             real_delay = int(np.ceil(elapsed * self._fps))
             real_delay = min(real_delay, max(0, len(raw_actions) - self._execution_horizon))
@@ -293,6 +309,7 @@ class RTCActionChunking(InferenceRunner):
             self._queue.merge(
                 raw_actions, processed_actions, real_delay,
                 action_index_before_inference=action_index_before,
+                blend_steps=self._blend_steps,
             )
             self._first_chunk_ready.set()
 
