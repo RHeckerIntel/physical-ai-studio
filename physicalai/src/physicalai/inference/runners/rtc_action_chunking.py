@@ -117,6 +117,11 @@ class RTCActionChunking(InferenceRunner):
         self._thread: Thread | None = None
         self._adapter: RuntimeAdapter | None = None
 
+    @property
+    def runner_provided_keys(self) -> set[str]:
+        """RTC-specific inputs injected by the background thread."""
+        return {"noise", "prev_chunk_left_over", "inference_delay"}
+
     def run(
         self,
         adapter: RuntimeAdapter,
