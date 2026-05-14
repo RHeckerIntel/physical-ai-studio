@@ -13,8 +13,8 @@ project_id = UUID("4823d433-e4ef-4378-84dd-f4d2b65d9278")
 dataset_id = UUID("3111cada-fc92-45ec-ab6e-e47da6f093c0")
 snapshot_path = "/home/intel/projects/physical-ai-studio/application/backend/snapshots/"
 policy = "pi05"
-model_name = "Bimanual ECU Pi05 Epoch 7"
-model_path = "/home/intel/projects/physical-ai-studio/application/backend/models/rhecker/bimanual-ecu/bimanual-ecu-pi05-epoch-7-base"
+model_name = "Bimanual ECU Pi05 Epoch 11"
+model_path = "/home/intel/projects/physical-ai-studio/application/backend/models/rhecker/bimanual-ecu/bimanual-ecu-pi05-epoch-11"
 
 async def create_model():
     dataset = await DatasetService.get_dataset_by_id(dataset_id)
