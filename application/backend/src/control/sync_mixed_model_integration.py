@@ -26,8 +26,9 @@ class SyncMixedModelIntegration:
     def select_action(self, observation: Observation) -> list[list[float]] | None:
         if self.inference_poller.has_result():
             inference_result = self.inference_poller.get_result()
-            offset = int(inference_result.time * self.fps)
-            self.queue_mixer.add(inference_result.data, offset)
+            #offset = int(inference_result.time * self.fps)
+            offset = 0
+            self.queue_mixer.add(inference_result.data[:25], offset)
             self.queue_mixer.lerp_duration = max(offset, 1)
 
         # if self.use_synchronous we wait for the queue_mixer to empty first.

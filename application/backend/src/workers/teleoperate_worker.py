@@ -90,7 +90,7 @@ class TeleoperateWorker(BaseProcessWorker):
                     elif self.get_action_source() == ActionWriteState.FROM_ACTIONS:
                         raw_actions = self.get_actions()
                         actions = {i: raw_actions[k] for k, i in enumerate(features)}
-                        self.follower.set_joints_state(actions, goal_time * 2)
+                        self.follower.set_joints_state(actions, goal_time * 3)
         finally:
             logger.info("Teleoperating stopped, disconnecting robots.")
             if self.leader:
