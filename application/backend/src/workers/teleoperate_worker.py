@@ -33,7 +33,7 @@ class TeleoperateWorker(BaseProcessWorker):
         self._action_source = mp.Value(ctypes.c_int, ActionWriteState.NONE)
         self._output_actions = mp.Array(ctypes.c_double, buffer_length)
         self._output_state = mp.Array(ctypes.c_double, buffer_length)
-        self._set_actions(follower.home_position)
+        #self._set_actions(follower.home_position)
         super().__init__(
             stop_event=mp_stop_event,
             queues_to_cancel=[],
