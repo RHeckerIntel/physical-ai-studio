@@ -96,9 +96,9 @@ class BimanualWidowXAIAdapter(RobotClient):
             else:
                 pos = float(np.rad2deg(obs.joint_positions[i]))
 
-            vel = float(sensor_data["velocities"][i])
+            #vel = float(sensor_data["velocities"][i])
             result[f"{name}.pos"] = pos
-            result[f"{name}.vel"] = vel
+            #result[f"{name}.vel"] = vel
 
         return result
 
@@ -184,5 +184,6 @@ class BimanualWidowXAIAdapter(RobotClient):
 
     def features(self) -> list[str]:
         positions: list[str] = [f"{name}.pos" for name in self._robot.joint_names]
-        velocities: list[str] = [f"{name}.vel" for name in self._robot.joint_names]
-        return positions + velocities
+        return positions
+        #velocities: list[str] = [f"{name}.vel" for name in self._robot.joint_names]
+        #return positions + velocities
