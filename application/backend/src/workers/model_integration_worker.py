@@ -1,14 +1,14 @@
 import asyncio
 import ctypes
 import multiprocessing as mp
+import time
 from multiprocessing.synchronize import Event as EventClass
 
+from loguru import logger
 from control.environment_data_manifest import EnvironmentDataManifest
 from control.utils import format_observation_for_model, get_observation_from_manifest
 from schemas.model import Model
 from workers.base import BaseProcessWorker, run_at_frequency
-from workers.model_worker import ModelWorker
-from workers.remote_model_worker import RemoteModelWorker
 
 
 class ModelIntegration(BaseProcessWorker):
@@ -36,22 +36,15 @@ class ModelIntegration(BaseProcessWorker):
         self._task_buf = mp.Array(ctypes.c_char, 256)
         self._start_task_event = mp.Event()
         self._stop_task_event = mp.Event()
+        self.chunk: list[list[float]] = []
+
+
 
     async def setup(self) -> None:
-        from control.sync_mixed_model_integration import SyncMixedModelIntegration
+        #from control.sync_mixed_model_integration import SyncMixedModelIntegration
+        from models.utils import load_inference_model
 
-        try:
-            remote_worker = RemoteModelWorker()
-            remote_worker.connect()
-            remote_worker.load_model(self.model, self.backend)
-            self.model_integration = SyncMixedModelIntegration(model_worker=remote_worker, fps=self.fps)
-        except ConnectionRefusedError:
-            model_worker = ModelWorker(self.model, self.backend, stop_event=self._interrupt_event)
-            self.model_integration = SyncMixedModelIntegration(model_worker=model_worker, fps=self.fps)
-            model_worker.start()
-            self._child_workers.append(model_worker)
-        assert self.model_integration is not None  # noqa: S101
-        await self.model_integration.setup()
+        self.inference_model = load_inference_model(self.model, backend=self.backend)
         self.loaded_event.set()
 
     def start_task(self, task: str) -> None:
@@ -69,13 +62,18 @@ class ModelIntegration(BaseProcessWorker):
                     self._handle_stop_task(),
                 )
 
-                if self.model_integration and self.is_running:
-                    obs = get_observation_from_manifest(self.data_manifest)
-                    observation = format_observation_for_model(obs, self.data_manifest)
-                    action = self.model_integration.select_action(observation)
-                    if action is not None:
-                        with self.data_manifest.robot.actions.get_lock():
-                            self.data_manifest.robot.actions.get_obj()[:] = action
+                if self.inference_model and self.is_running:
+                    if len(self.chunk) == 0:
+                        obs = get_observation_from_manifest(self.data_manifest)
+                        observation = format_observation_for_model(obs, self.data_manifest, self.get_task())
+                        start = time.perf_counter()
+                        self.chunk = list(self.inference_model.predict_action_chunk(observation.to_numpy().to_dict(flatten=False))[0])[:25]
+                        elapsed = time.perf_counter() - start
+                        logger.info(f"Inference: ({elapsed})")
+
+                    action = self.chunk.pop(0)
+                    with self.data_manifest.robot.actions.get_lock():
+                        self.data_manifest.robot.actions.get_obj()[:] = action
 
     def get_task(self) -> str:
         return bytes(self._task_buf.get_obj()).rstrip(b"\x00").decode()
@@ -90,6 +88,7 @@ class ModelIntegration(BaseProcessWorker):
     async def _handle_start_task(self) -> None:
         if self._start_task_event.is_set():
             self._start_task_event.clear()
+            self.chunk.clear()
             self.is_running = True
             self.event_queue.put_nowait(
                 {
