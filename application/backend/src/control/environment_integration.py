@@ -5,7 +5,7 @@ from typing import Any
 from control.environment_data_manifest import CameraManifestEntry, EnvironmentDataManifest, RobotManifestEntry
 from robots.robot_client_factory import RobotClientFactory
 from schemas.environment import EnvironmentWithRelations, TeleoperatorRobotWithRobot
-from workers.camera_worker import CameraWorker
+from workers.camera_worker_registry import acquire_camera_worker, release_camera_worker
 from workers.teleoperate_worker import TeleoperateWorker
 
 
@@ -24,7 +24,10 @@ class EnvironmentIntegration:
         self.cameras = environment.cameras
         self.robot_client_factory = robot_client_factory
         self._mp_terminate_event = mp_terminate_event
+        # Non-camera workers (e.g. TeleoperateWorker) owned exclusively by this instance.
         self._workers: list[Any] = []
+        # Fingerprints of camera workers acquired from the shared registry.
+        self._acquired_camera_fingerprints: list[str] = []
 
     async def setup_environment(self) -> None:
         try:
@@ -52,8 +55,8 @@ class EnvironmentIntegration:
 
             camera_entries = []
             for camera in self.cameras:
-                worker = CameraWorker(camera, self._mp_terminate_event)
-                self._workers.append(worker)
+                worker = await acquire_camera_worker(camera, self._mp_terminate_event)
+                self._acquired_camera_fingerprints.append(camera.fingerprint)
                 camera_entries.append(
                     CameraManifestEntry(
                         id=str(camera.id),
@@ -73,10 +76,16 @@ class EnvironmentIntegration:
 
             self.manifest = EnvironmentDataManifest(robot=robot_entry, cameras=camera_entries)
         except Exception:
+            for fingerprint in self._acquired_camera_fingerprints:
+                release_camera_worker(fingerprint)
+            self._acquired_camera_fingerprints.clear()
             for worker in self._workers:
                 worker.stop()
             raise
 
     def teardown(self) -> None:
+        for fingerprint in self._acquired_camera_fingerprints:
+            release_camera_worker(fingerprint)
+        self._acquired_camera_fingerprints.clear()
         for worker in self._workers:
             worker.stop()

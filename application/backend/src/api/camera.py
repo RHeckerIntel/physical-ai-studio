@@ -11,7 +11,7 @@ from schemas.camera import SupportedCameraFormat
 from schemas.project_camera import Camera as ProjectCamera
 from schemas.project_camera import CameraAdapter
 from workers.base import run_at_frequency
-from workers.camera_worker import CameraWorker
+from workers.camera_worker_registry import acquire_camera_worker, release_camera_worker
 
 router = APIRouter(prefix="/api/cameras", tags=["Cameras"])
 
@@ -82,8 +82,7 @@ async def camera_websocket(
 
     worker = None
     try:
-        worker = CameraWorker(camera, scheduler.mp_stop_event)
-        worker.start()
+        worker = await acquire_camera_worker(camera, scheduler.mp_stop_event)
         while True:
             async with run_at_frequency(camera.payload.fps):
                 frame = worker.get_frame()
@@ -93,5 +92,5 @@ async def camera_websocket(
     except WebSocketDisconnect:
         pass
     finally:
-        if worker:
-            worker.stop()
+        if worker is not None:
+            release_camera_worker(camera.fingerprint)
