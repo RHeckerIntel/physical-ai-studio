@@ -75,7 +75,7 @@ class ModelWorker(BaseProcessWorker):
                     start_time = time.perf_counter()
                     output = self.inference_model.predict_action_chunk(observation.to_numpy().to_dict(flatten=False))[0]
                     elapsed_time = time.perf_counter() - start_time
-                    logger.debug(f"Inference: ({elapsed_time}): {output.shape}")
+                    logger.info(f"Inference: ({elapsed_time}): {output.shape}")
                     self.output_queue.put(InferenceResult(time=elapsed_time, data=output))
                 except queue.Empty:
                     continue

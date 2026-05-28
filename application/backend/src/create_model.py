@@ -9,12 +9,12 @@ from services import DatasetService, ModelService
 from services.job_service import JobService
 
 model_id = uuid4()
-project_id = UUID("4823d433-e4ef-4378-84dd-f4d2b65d9278")
-dataset_id = UUID("3111cada-fc92-45ec-ab6e-e47da6f093c0")
+project_id = UUID("a2888fd9-fd00-410d-95f1-57e21a3c4802")
+dataset_id = UUID("c9cca09a-c95d-4d0a-85a9-b1f466183ce0")
 snapshot_path = "/home/intel/projects/physical-ai-studio/application/backend/snapshots/"
 policy = "pi05"
-model_name = "Bimanual ECU Pi05 Epoch 11"
-model_path = "/home/intel/projects/physical-ai-studio/application/backend/models/rhecker/bimanual-ecu/bimanual-ecu-pi05-epoch-11"
+model_name = "Nonomacreek Epoch015 Token 100 int8 sym"
+model_path = "/home/intel/projects/physical-ai-studio/application/backend/models/arendjan/nonomacreek_epoch15_100_int8_sym"
 
 async def create_model():
     dataset = await DatasetService.get_dataset_by_id(dataset_id)
