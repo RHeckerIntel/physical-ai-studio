@@ -1,3 +1,7 @@
+from physicalai.inference.manifest import CameraSpec
+from internal_datasets.dataset_spec import DatasetSpec
+from physicalai.inference.manifest import OrderedTensorSpec
+import re
 import copy
 import shutil
 from pathlib import Path
@@ -120,6 +124,38 @@ class InternalLeRobotDataset(DatasetClient):
         if not self.exists_on_disk:
             return []
         return list(self._dataset.meta.tasks.to_dict()["task_index"].keys())
+
+    @staticmethod
+    def _get_dtype_of_feature(dtype: str) -> str:
+        if dtype == "video":
+            return "uint8"
+        return dtype
+
+    def get_dataset_spec(self) -> DatasetSpec | None:
+        """Get Tasks in dataset."""
+        features = self._dataset.features
+        dataset_spec = DatasetSpec()
+
+        _IGNORED_FEATURES = ["timestamp", "frame_index", "episode_index", "index", "task_index"]
+
+        for feature_name, feature in features.items():
+            if feature_name in _IGNORED_FEATURES:
+                pass
+            elif "observation.images" in feature_name:
+                name = re.sub("observation.images.", "", feature_name)
+                dataset_spec.cameras[name] = CameraSpec(
+                    name=name,
+                    shape=list(feature["shape"]),
+                    dtype="uint8",
+                )
+            else:
+                dataset_spec.features[feature_name] = OrderedTensorSpec(
+                    dtype=self._get_dtype_of_feature(feature["dtype"]),
+                    shape=list(feature["shape"]),
+                    order=feature["names"] or [feature_name],
+                )
+
+        return dataset_spec
 
     def get_video_path(self, episode: int, camera: str) -> Path:
         """Get Video path of specific episode and camera."""

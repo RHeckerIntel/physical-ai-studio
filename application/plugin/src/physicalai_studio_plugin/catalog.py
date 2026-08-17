@@ -1,6 +1,7 @@
 """Core plugin catalog protocol and definition types."""
 
 from __future__ import annotations
+from physicalai.inference.manifest import OrderedTensorSpec
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -58,6 +59,7 @@ class RobotCatalogDefinition(Generic[_PayloadT]):
     robot_builder: BuildRobotCallable | None = None
     robot_payload: _PayloadModelT | None = None
     asset: RobotAsset | None = None
+    features: OrderedTensorSpec | None = None
 
     adapter_options: RobotAdapterOptions = field(default_factory=RobotAdapterOptions)
     probe: RobotProbe[_PayloadT] | None = None

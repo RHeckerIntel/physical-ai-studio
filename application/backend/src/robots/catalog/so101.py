@@ -1,4 +1,5 @@
 from __future__ import annotations
+from physicalai.inference.manifest import OrderedTensorSpec
 
 from datetime import datetime
 from pathlib import Path
@@ -223,6 +224,8 @@ class SO101Probe:
 
 _SO101_PROBE = SO101Probe()
 
+_SO101_FEATURES = OrderedTensorSpec(order=list(_SO101_TO_URDF), dtype="float32", shape=[len(_SO101_TO_URDF)])
+
 
 def get_definitions() -> list[RobotCatalogDefinition]:
     """Return built-in SO101 robot catalog definitions."""
@@ -234,6 +237,7 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_so101_driver,
             robot_payload=SO101RobotPayload,
             asset=_SO101_ASSET,
+            features=_SO101_FEATURES,
             adapter_options=RobotAdapterOptions(goal_time_scale=1.0, external_effort_gain=None),
             probe=_SO101_PROBE,
         ),
@@ -244,6 +248,7 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_so101_driver,
             robot_payload=SO101RobotPayload,
             asset=_SO101_ASSET,
+            features=_SO101_FEATURES,
             adapter_options=RobotAdapterOptions(goal_time_scale=1.0, external_effort_gain=None),
             probe=_SO101_PROBE,
         ),

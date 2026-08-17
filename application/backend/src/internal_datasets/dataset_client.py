@@ -1,3 +1,5 @@
+from internal_datasets.dataset_spec import DatasetSpec
+from physicalai.inference.manifest import OrderedTensorSpec
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,6 +38,10 @@ class DatasetClient(ABC):
     @abstractmethod
     def get_tasks(self) -> list[str]:
         """Get Tasks in dataset."""
+
+    @abstractmethod
+    def get_dataset_spec(self) -> DatasetSpec | None:
+        """Get features of dataset in DatasetSpec."""
 
     @abstractmethod
     def get_video_path(self, episode: int, camera: str) -> Path:

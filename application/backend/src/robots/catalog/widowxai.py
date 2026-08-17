@@ -1,4 +1,5 @@
 from __future__ import annotations
+from physicalai.inference.manifest import OrderedTensorSpec
 
 from datetime import datetime
 from pathlib import Path
@@ -239,6 +240,9 @@ class TrossenBimanualProbe:
 _SINGLE_ARM_PROBE = TrossenSingleArmProbe()
 _BIMANUAL_PROBE = TrossenBimanualProbe()
 
+_WIDOWXAI_FEATURES = OrderedTensorSpec(order=list(_TROSSEN_TO_URDF), dtype="float32", shape=[len(_TROSSEN_TO_URDF)])
+_WIDOWXAI_BIMANUAL_FEATURES = OrderedTensorSpec(order=list(_BIMANUAL_TROSSEN_TO_URDF), dtype="float32", shape=[len(_BIMANUAL_TROSSEN_TO_URDF)])
+
 
 def get_definitions() -> list[RobotCatalogDefinition]:
     """Return built-in WidowX AI robot catalog definitions."""
@@ -250,6 +254,7 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_trossen_single_arm_driver,
             robot_payload=TrossenSingleArmPayload,
             asset=_TROSSEN_SINGLE_ARM_ASSET,
+            features=_WIDOWXAI_FEATURES,
             adapter_options=RobotAdapterOptions(include_velocities=True, goal_time_scale=1.0, external_effort_gain=0.1),
             probe=_SINGLE_ARM_PROBE,
         ),
@@ -260,6 +265,7 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_trossen_single_arm_driver,
             robot_payload=TrossenSingleArmPayload,
             asset=_TROSSEN_SINGLE_ARM_ASSET,
+            features=_WIDOWXAI_FEATURES,
             adapter_options=RobotAdapterOptions(include_velocities=True, goal_time_scale=1.0, external_effort_gain=0.1),
             probe=_SINGLE_ARM_PROBE,
         ),
@@ -270,6 +276,7 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_trossen_bimanual_driver,
             robot_payload=TrossenBimanualPayload,
             asset=_TROSSEN_BIMANUAL_ASSET,
+            features=_WIDOWXAI_BIMANUAL_FEATURES,
             adapter_options=RobotAdapterOptions(include_velocities=True, goal_time_scale=1.0, external_effort_gain=0.1),
             probe=_BIMANUAL_PROBE,
         ),
@@ -280,6 +287,7 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_trossen_bimanual_driver,
             robot_payload=TrossenBimanualPayload,
             asset=_TROSSEN_BIMANUAL_ASSET,
+            features=_WIDOWXAI_FEATURES,
             adapter_options=RobotAdapterOptions(include_velocities=True, goal_time_scale=1.0, external_effort_gain=0.1),
             probe=_BIMANUAL_PROBE,
         ),
