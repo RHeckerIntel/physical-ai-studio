@@ -180,6 +180,12 @@ class InternalLeRobotDataset(DatasetClient):
         shutil.copytree(source.path, self.path)
         self.load_dataset()
 
+    def has_source_feature(self) -> bool:
+        """Check if dataset contains source feature for Human In The Loop."""
+        if not self.exists_on_disk:
+            return False
+        return "source" in self._dataset.features
+
     def get_episodes(self) -> list[Episode]:
         """Get episodes of dataset."""
 
@@ -217,9 +223,9 @@ class InternalLeRobotDataset(DatasetClient):
             for episode in episodes
         ]
 
-    def add_frame(self, obs: dict, act: dict, task: str) -> None:
+    def add_frame(self, obs: dict, act: dict, task: str, other: dict) -> None:
         """Add frame to recording buffer."""
-        frame = self._process_frame(obs, act, task)
+        frame = self._process_frame(obs, act, task, other)
         self._dataset.add_frame(frame)
 
     def save_episode(self) -> None:
@@ -251,13 +257,13 @@ class InternalLeRobotDataset(DatasetClient):
             self._dataset.writer.stop_image_writer()
         self._dataset.finalize()
 
-    def _process_frame(self, obs: dict, act: dict, task: str) -> dict:
+    def _process_frame(self, obs: dict, act: dict, task: str, extra: dict) -> dict:
         obs_processed = self._robot_observation_processor(obs)
         act_processed_teleop = self._teleop_action_processor((act, obs))
         action_frame = build_dataset_frame(self._dataset.features, act_processed_teleop, prefix=ACTION)
         observation_frame = build_dataset_frame(self._dataset.features, obs_processed, prefix=OBS_STR)
 
-        return {**observation_frame, **action_frame, "task": task}
+        return {**observation_frame, **action_frame, "task": task, **extra}
 
     def start_recording_mutation(self, fps: int, features: dict, robot_type: str) -> RecordingMutation:
         """Start recording mutation."""
@@ -361,6 +367,15 @@ class InternalLeRobotDataset(DatasetClient):
         actions = self._dataset.hf_dataset["action"][from_idx:to_idx]
         return torch.stack(actions)
 
+    def _get_episode_sources(self, episode: dict) -> torch.Tensor:
+        """Get episode source tensor from specific episode."""
+        from_idx = episode["dataset_from_index"]
+        to_idx = episode["dataset_to_index"]
+        if self.has_source_feature():
+            sources = self._dataset.hf_dataset["source"][from_idx:to_idx]
+            return torch.stack(sources)
+        return torch.zeros(to_idx - from_idx, dtype=torch.int32)
+
     def _build_episode_from_metadata(self, episode: EpisodeMetadata) -> Episode:
         metadata = self._dataset.meta
         episode_index = episode["episode_index"]
@@ -377,6 +392,7 @@ class InternalLeRobotDataset(DatasetClient):
                 )
                 for video_key in self._dataset.meta.video_keys
             },
+            source=self._get_episode_sources(episode).tolist(),
             action_keys=action_feature_names,
             **episode,
         )

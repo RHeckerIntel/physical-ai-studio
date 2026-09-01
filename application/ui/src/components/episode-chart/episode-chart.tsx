@@ -5,6 +5,7 @@ import {
     Legend,
     Line,
     LineChart,
+    ReferenceArea,
     ReferenceLine,
     ResponsiveContainer,
     XAxis,
@@ -17,6 +18,54 @@ function buildChartData(actions: number[][], joints: string[], fps: number) {
         index: idx / fps,
         ...joints.reduce((acc, joint, index) => ({ ...acc, [joint]: row[index] }), {}),
     }));
+}
+
+enum EpisodeSourceType {
+    Teleoperation,
+    Model,
+}
+
+const episodeSourceTypeColors = {
+    [EpisodeSourceType.Teleoperation]: '#5ac3f8',
+    [EpisodeSourceType.Model]: 'red',
+};
+
+const episodeSourceTypeLabels = {
+    [EpisodeSourceType.Teleoperation]: 'Teleoperation',
+    [EpisodeSourceType.Model]: 'Model',
+};
+
+interface ChartSegment {
+    start: number;
+    end?: number;
+    source: EpisodeSourceType;
+}
+
+function buildSegments(source: number[], fps: number) {
+    return source.reduce<ChartSegment[]>((acc, source_point, index) => {
+        if (acc.length === 0) {
+            return [
+                {
+                    start: 0,
+                    source: source_point,
+                },
+            ];
+        }
+        if (acc.at(-1)!.source !== source_point) {
+            return [
+                ...acc.with(-1, { ...acc.at(-1)!, end: index / fps }),
+                {
+                    start: index / fps,
+                    source: source_point,
+                },
+            ];
+        }
+        if (index + 1 === source.length) {
+            return acc.with(-1, { ...acc.at(-1)!, end: index / fps });
+        }
+
+        return acc;
+    }, []);
 }
 
 const lineColors = ['#ff7300', '#387908', '#8884d8', '#82ca9d', '#ffbb28', '#a83279', '#aaffff'];
@@ -40,6 +89,7 @@ function stripPosSuffix(name: string) {
 }
 interface EpisodeChartProps {
     actions: number[][];
+    source: number[];
     joints: string[];
     fps: number;
     time: number;
@@ -49,10 +99,25 @@ interface EpisodeChartProps {
     isPlaying: boolean;
 }
 
-export default function EpisodeChart({ actions, joints, fps, time, seek, play, pause, isPlaying }: EpisodeChartProps) {
+export default function EpisodeChart({
+    actions,
+    source,
+    joints,
+    fps,
+    time,
+    seek,
+    play,
+    pause,
+    isPlaying,
+}: EpisodeChartProps) {
     const [hoverPosition, setHoverPosition] = useState<number | undefined>(undefined);
     const [mouseDown, setMouseDown] = useState<boolean>(false);
     const posJoints = useMemo(() => joints.filter(isPosJoint), [joints]);
+
+    const segments = useMemo(() => {
+        return buildSegments(source, fps);
+    }, [source, fps]);
+
     const chartData = useMemo(() => {
         return buildChartData(actions, posJoints, fps);
     }, [actions, posJoints, fps]);
@@ -60,6 +125,8 @@ export default function EpisodeChart({ actions, joints, fps, time, seek, play, p
         () => [...Array(Math.floor((actions.length / fps) * 2)).keys()].map((m) => m / 2),
         [actions.length, fps]
     );
+
+    console.log(segments);
 
     const continuePlayingOnRelease = useRef<boolean>(false);
 
@@ -121,6 +188,17 @@ export default function EpisodeChart({ actions, joints, fps, time, seek, play, p
                     <ReferenceLine x={hoverPosition} stroke='#5ac3f8' label='' strokeWidth={2} />
                 )}
                 <ReferenceLine x={time} stroke='#ffffff' label='' strokeWidth={2} />
+                {segments.map((s) => (
+                    <ReferenceArea
+                        key={`${s.start}-${s.end}`}
+                        x1={s.start}
+                        x2={s.end}
+                        fill={episodeSourceTypeColors[s.source]}
+                        fillOpacity={0.15}
+                        ifOverflow='hidden'
+                        label={{ value: episodeSourceTypeLabels[s.source], position: 'insideTop' }}
+                    />
+                ))}
 
                 {posJoints.map((joint, i) => (
                     <Line

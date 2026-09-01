@@ -7,6 +7,7 @@ import {
     Flex,
     Heading,
     Item,
+    Keyboard,
     Link,
     ProgressCircle,
     StatusLight,
@@ -21,6 +22,8 @@ import { RobotModelsProvider } from '../../robots/robot-models-context';
 import { useRuntimeSession } from '../../robots/runtime-session-provider';
 import { runtimeExportUrl } from '../runtime-export';
 
+import classes from './inference-viewer.module.css';
+
 interface InferenceViewerProps {
     tasks: string[];
 }
@@ -30,8 +33,20 @@ export const InferenceViewer = ({ tasks }: InferenceViewerProps) => {
 
     const [task, setTask] = useState<string>(tasks[0] ?? '');
 
-    const { model, readyForInference, state, startTask, stopTask, environment, observation, inferenceDevice } =
-        useRuntimeSession();
+    const {
+        model,
+        readyForInference,
+        state,
+        startTask,
+        stopTask,
+        environment,
+        observation,
+        inferenceDevice,
+        startEpisode,
+        discardEpisode,
+        saveEpisode,
+        setFollowerSource,
+    } = useRuntimeSession();
 
     const exportUrl =
         model?.id !== undefined && inferenceDevice !== undefined
@@ -103,6 +118,33 @@ export const InferenceViewer = ({ tasks }: InferenceViewerProps) => {
                                 Play
                             </Button>
                         )}
+                        {state.is_recording ? (
+                            <ButtonGroup>
+                                <Button
+                                    isDisabled={saveEpisode.isPending}
+                                    variant={'negative'}
+                                    onPress={() => discardEpisode.mutate()}
+                                >
+                                    <Text>Discard</Text>
+                                    <Keyboard UNSAFE_className={classes.hotkey}>←</Keyboard>
+                                </Button>
+                                <Button isPending={saveEpisode.isPending} onPress={() => saveEpisode.mutate()}>
+                                    <Text>Accept</Text>
+                                    <Keyboard UNSAFE_className={classes.hotkey}>→</Keyboard>
+                                </Button>
+                            </ButtonGroup>
+                        ) : (
+                            <Button onPress={() => startEpisode.mutate(task)}>
+                                <Text>Start episode</Text>
+                                <Keyboard UNSAFE_className={classes.hotkey}>→</Keyboard>
+                            </Button>
+                        )}
+                        <Button onPress={() => setFollowerSource.mutate('hold')}>
+                            <Text>Hold</Text>
+                        </Button>
+                        <Button onPress={() => setFollowerSource.mutate('teleop')}>
+                            <Text>Teleop</Text>
+                        </Button>
                     </ButtonGroup>
                 </Flex>
                 <RobotControlView environment={environment} isReady={state.connected} joints={observation} />

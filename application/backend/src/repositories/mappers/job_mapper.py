@@ -16,4 +16,4 @@ class JobMapper(IBaseMapper):
 
     @staticmethod
     def from_schema(model: JobDB) -> Job:
-        return JOB_ADAPTER.validate_python(model, from_attributes=True)
+        return JOB_ADAPTER.validate_python(model, from_attributes=True, extra='allow')

@@ -44,11 +44,13 @@ const LiveEpisodeChart = ({ episode, player }: LiveEpisodeChartProps) => {
         player.seek(newTime);
         setTime(newTime);
     };
+    console.log(episode);
 
     return (
         <EpisodeChart
             actions={episode.actions}
             joints={episode.action_keys}
+            source={episode.source}
             fps={episode.fps}
             time={time}
             seek={onSeek}

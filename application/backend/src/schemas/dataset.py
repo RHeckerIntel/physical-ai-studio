@@ -27,6 +27,7 @@ class Episode(BaseModel):
     fps: int
     tasks: list[str]
     actions: list[list[float]]
+    source: list[int]
     action_keys: list[str]
     videos: dict[str, EpisodeVideo]
 

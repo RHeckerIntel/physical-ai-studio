@@ -270,12 +270,14 @@ class RuntimeSession:
             dataset = InternalLeRobotDataset(dataset_path, access_mode=DatasetAccessMode.RECORDING_MUTATION)
             if self._follower is None:
                 raise RuntimeError("Follower robot is not set up")
-            mutation = dataset.start_recording_mutation(
-                fps=int(self._document["init_args"]["fps"]),
-                features=build_lerobot_dataset_features(
+            features = build_lerobot_dataset_features(
                     joint_names=list(self._follower.joint_names),
                     camera_specs=self._camera_specs_from_frames(),
-                ),
+                )
+            features["source"] = {"dtype": "int64", "shape": (1,), "names": None}
+            mutation = dataset.start_recording_mutation(
+                fps=int(self._document["init_args"]["fps"]),
+                features=features,
                 robot_type=self._follower_name or "unknown",
             )
             self._recording.attach_mutation(mutation)

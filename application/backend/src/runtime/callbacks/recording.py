@@ -73,12 +73,12 @@ class RecordingState:
         with self._lock:
             self._is_recording = False
 
-    def add_frame(self, observation: dict[str, Any], action: dict[str, float]) -> None:
+    def add_frame(self, observation: dict[str, Any], action: dict[str, float], other: dict[str, Any]) -> None:
         """Write one tick under the state lock so save/discard cannot interleave."""
         with self._lock:
             if self._closed or not self._is_recording or self._mutation is None or self._task is None:
                 return
-            self._mutation.add_frame(observation, action, self._task)
+            self._mutation.add_frame(observation, action, self._task, other)
 
     def stop_episode(self) -> RecordingMutation:
         """Clear the recording flag so ticks skip, then return the mutation.
@@ -143,7 +143,8 @@ class RecordingCallback:
             self._joint_names = list(event.metadata["joint_names"])
 
     def on_tick(self, event: TickEvent) -> None:
-        if self._follower_source() == "hold":
+        follower_source = self._follower_source()
+        if follower_source == "hold":
             return
         if event.action_sent is None or not self._joint_names:
             return
@@ -157,8 +158,9 @@ class RecordingCallback:
         for key, frame in event.camera_frames.items():
             observation[key] = np.array(frame.data, copy=True)
         action = action_to_dict(self._joint_names, event.action_sent)
+        other = {"source": np.array([0 if follower_source == "teleop" else 1], dtype=np.int64)}
         try:
-            self._recording.add_frame(observation, action)
+            self._recording.add_frame(observation, action, other)
         except Exception:
             logger.exception("Failed to write a recording frame")
 

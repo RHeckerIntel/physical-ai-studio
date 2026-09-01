@@ -64,7 +64,7 @@ class DatasetClient(ABC):
         """Copy over repo without given episode_indices to output_path."""
 
     @abstractmethod
-    def add_frame(self, obs: dict, act: dict, task: str) -> None:
+    def add_frame(self, obs: dict, act: dict, task: str, other: dict) -> None:
         """Add frame to recording buffer."""
 
     @abstractmethod
@@ -90,6 +90,10 @@ class DatasetClient(ABC):
     @abstractmethod
     def overwrite(self, source: "DatasetClient") -> None:
         """Overwrite dataset with given dataset."""
+
+    @abstractmethod
+    def has_source_feature(self) -> bool:
+        """Check if dataset contains source feature for Human In The Loop."""
 
     @abstractmethod
     def start_recording_mutation(self, fps: int, features: dict, robot_type: str) -> "RecordingMutation":

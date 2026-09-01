@@ -19,6 +19,10 @@ export const InferencePage = () => {
         params: { path: { dataset_id: model.dataset_id! } },
     });
 
+    const { data: test_dataset } = $api.useSuspenseQuery('get', '/api/dataset/{dataset_id}', {
+        params: { path: { dataset_id: '9b320666-9a42-49fc-b30b-1a08daf7abd0' } },
+    });
+
     const { data: initialEnvironment } = $api.useSuspenseQuery(
         'get',
         '/api/projects/{project_id}/environments/{environment_id}',
@@ -41,6 +45,7 @@ export const InferencePage = () => {
         <RuntimeSessionProvider
             environment={initialEnvironment}
             model={model}
+            dataset={test_dataset}
             inferenceDevice={inferenceDevice}
             onError={ToastQueue.negative}
         >
