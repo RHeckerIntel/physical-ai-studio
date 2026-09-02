@@ -1,6 +1,6 @@
 import { createContext, RefObject, Suspense, useContext, useEffect, useRef } from 'react';
 
-import { Flex, Loading, View } from '@geti-ui/ui';
+import { Flex, Loading, View, Text } from '@geti-ui/ui';
 import {
     DockviewApi,
     DockviewReact,
@@ -13,6 +13,7 @@ import { SchemaEnvironmentWithRelations } from '../../../api/openapi-spec';
 import { physicalAiTheme } from '../../dockview';
 import { CameraCell } from './camera-cell.component';
 import { RobotCell } from './robot-cell.component';
+import LiveEpisodeChart from './live-episode-chart';
 
 const CenteredLoading = () => {
     return (

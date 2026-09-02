@@ -23,6 +23,7 @@ import { useRuntimeSession } from '../../../features/robots/runtime-session-prov
 import { paths } from '../../../router';
 
 import classes from './recording-viewer.module.css';
+import LiveEpisodeChart from '../../../features/robots/robot-control/live-episode-chart';
 
 export const RecordingViewer = () => {
     const {
@@ -34,6 +35,7 @@ export const RecordingViewer = () => {
         readyForRecording,
         environment,
         observation,
+        episodeBuffer,
         actions,
     } = useRuntimeSession();
 
@@ -143,6 +145,7 @@ export const RecordingViewer = () => {
                         },
                     }}
                 />
+                <LiveEpisodeChart />
             </Flex>
         </RobotModelsProvider>
     );

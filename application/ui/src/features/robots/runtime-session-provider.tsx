@@ -14,6 +14,18 @@ import { FollowerSource, runtimeSocketUrl } from './use-joint-state';
 
 type InferenceDevice = Pick<SchemaInferenceDeviceInfo, 'backend' | 'device'>;
 
+export interface EpisodeBuffer {
+    actions: Record<string, number>[];
+    actionsLeftToConsume: number;
+}
+
+const addFrameToEpisodeBuffer = (buffer: EpisodeBuffer, frame: Record<string, number>, max: number = 50) => {
+  const shouldConsume = buffer.actions.length >= max || buffer.actionsLeftToConsume > 0;
+  const actionsLeftToConsume = Math.max(0, buffer.actionsLeftToConsume - 1);
+  const next = shouldConsume ? buffer.actions.slice(1) : buffer.actions.slice();
+  return {...buffer, actions: [...next, frame], actionsLeftToConsume};
+}
+
 interface RuntimeSessionState {
     connected: boolean;
     follower_source: FollowerSource;
@@ -59,6 +71,7 @@ type RuntimeSessionContextValue = {
     environment: SchemaEnvironmentWithRelations;
     model: SchemaModel | undefined;
     dataset: SchemaDatasetOutput | undefined;
+    episodeBuffer: RefObject<EpisodeBuffer>;
     inferenceDevice: InferenceDevice | undefined;
     state: RuntimeSessionState;
     loadModel: MutationResult<{ model: SchemaModel; inference_device: InferenceDevice }>;
@@ -115,6 +128,7 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
     const [state, setState] = useState<RuntimeSessionState>(createRuntimeSessionState());
     const observation = useRef<Record<string, number> | undefined>(undefined);
     const actions = useRef<Record<string, number> | undefined>(undefined);
+    const episodeBuffer = useRef<EpisodeBuffer>({actions: [], actionsLeftToConsume: 0});
     const [model, setModel] = useState<SchemaModel | undefined>(props.model);
     const [inferenceDevice, setInferenceDevice] = useState<InferenceDevice | undefined>(props.inferenceDevice);
     const [dataset, setDataset] = useState<SchemaDatasetOutput | undefined>(props.dataset);
@@ -143,8 +157,10 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
         onMessage: (event: WebSocketEventMap['message']) => {
             const message = JSON.parse(event.data) as RuntimeApiJsonResponse<unknown>;
             if (message.event === 'observation' && message.data !== undefined && typeof message.data === 'object') {
-                observation.current = message.data as Record<string, number>;
+                const data = message.data as Record<string, number>;
+                observation.current = data;
                 actions.current = message.actions ?? undefined;
+              episodeBuffer.current = addFrameToEpisodeBuffer(episodeBuffer.current, data, state.is_recording ? 10000 : 50);
             }
             if (message.event === 'state' && message.data !== undefined && typeof message.data === 'object') {
                 const next = message.data as Partial<RuntimeSessionState>;
@@ -234,6 +250,9 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
                 { event: 'start_recording', data: { task } },
                 ({ event, data }) => event === 'state' && data?.is_recording === true
             ),
+      onSuccess: () => {
+        episodeBuffer.current = {...episodeBuffer.current, actionsLeftToConsume: episodeBuffer.current.actions.length };
+      }
     });
 
     const saveEpisode = useMutation({
@@ -255,6 +274,9 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
             socket.sendJsonMessageAndWait<RuntimeApiJsonResponse>({ event: 'discard_episode', data: {} }, undefined, {
                 timeout: EPISODE_ACK_TIMEOUT_MS,
             }),
+      onSettled: () => {
+        episodeBuffer.current = {actions: [], actionsLeftToConsume: 0}
+      }
     });
 
     return (
@@ -265,6 +287,7 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
                 environment: props.environment,
                 model,
                 dataset,
+                episodeBuffer,
                 inferenceDevice,
                 state,
                 loadModel,
