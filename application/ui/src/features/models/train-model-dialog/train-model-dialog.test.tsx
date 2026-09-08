@@ -92,6 +92,14 @@ const renderDialog = (props: { baseModel?: SchemaModel } = {}) =>
         path: '/projects/:project_id/models',
     });
 
+// Training is submitted from the last wizard step, so a test that wants to press
+// Train has to walk through the steps in between first.
+const goToLastStep = async (user: ReturnType<typeof userEvent.setup>) => {
+    for (let step = 0; step < 3; step++) {
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+    }
+};
+
 describe('TrainModelDialog', () => {
     it('does not submit a remote job when the final health check fails', async () => {
         const user = userEvent.setup();
@@ -120,6 +128,7 @@ describe('TrainModelDialog', () => {
         await user.click(await screen.findByRole('button', { name: /this machine \(local\)/i }));
         await user.click(await screen.findByRole('option', { name: remoteTrainer.name }));
         await screen.findByText('Remote trainer selected');
+        await goToLastStep(user);
         await user.click(screen.getByRole('button', { name: 'Train' }));
 
         await waitFor(() => expect(healthCheckCount).toBeGreaterThan(1));
@@ -177,7 +186,7 @@ describe('TrainModelDialog', () => {
         expect(
             await screen.findByText(/This policy downloads pretrained assets from Hugging Face/i)
         ).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
     });
 
     it('blocks Pi0.5 training when the token lacks gated-model access', async () => {
@@ -204,6 +213,28 @@ describe('TrainModelDialog', () => {
         await user.click(screen.getByLabelText('Select Pi0.5 policy'));
 
         expect(await screen.findByText(/does not have access to this policy/i)).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    });
+
+    it('walks through the wizard steps and back', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+        expect(await screen.findByText(/Mapping dataset features/i)).toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+        expect(await screen.findByRole('slider', { name: /batch size/i })).toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+        expect(await screen.findByText(/Export format and optimization settings/i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Train' })).toBeEnabled();
+
+        await user.click(screen.getByRole('button', { name: 'Back' }));
+        expect(await screen.findByRole('slider', { name: /batch size/i })).toBeInTheDocument();
     });
 });

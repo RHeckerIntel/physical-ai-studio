@@ -1,35 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import {
-    Button,
-    ButtonGroup,
-    Content,
-    Dialog,
-    Disclosure,
-    DisclosurePanel,
-    DisclosureTitle,
-    Divider,
-    Flex,
-    Heading,
-    Item,
-    Key,
-    Picker,
-    Text,
-} from '@geti-ui/ui';
+import { Button, ButtonGroup, Content, Dialog, Divider, Flex, Heading, Key, Text, View } from '@geti-ui/ui';
 
 import { $api } from '../../../api/client';
 import { SchemaTrainJob as SchemaJob, SchemaModel } from '../../../api/openapi-spec';
 import { useProject } from '../../projects/use-project';
 import { useRemoteTrainerHealth } from '../../remote-trainers/use-remote-trainer-health';
-import { InlineAlert } from '../../robots/setup-wizard/shared/inline-alert';
+import { Stepper } from '../../robots/setup-wizard/shared/stepper';
+import { ExportStep } from './export-step';
+import { FeatureMappingStep } from './feature-mapping-step';
 import { MODELS } from './policies';
-import { PolicyAccessAlert } from './policy-access-alert';
-import { PolicySelection } from './policy-selection';
+import { SetupStep } from './setup-step';
 import { TrainingDeviceInfo } from './training-device-info';
 import { TrainingParameters } from './training-parameters';
 import { pickBestDevice, useBestTrainingDevice } from './use-training-devices';
-
-import classes from './train-model-dialog.module.css';
+import { WIZARD_STEP_LABELS, WIZARD_STEPS, WizardStep } from './wizard-steps';
 
 export type SchemaTrainJob = Omit<SchemaJob, 'payload'> & {
     payload: SchemaJob['payload'];
@@ -66,6 +51,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const defaultDatasetId = baseModel?.dataset_id ?? null;
     const extraPayload = baseModel ? { base_model_id: baseModel.id! } : undefined;
 
+    const [currentStep, setCurrentStep] = useState<WizardStep>('setup');
     const [selectedPolicy, setSelectedPolicy] = useState<string>(baseModel?.policy ?? 'act');
     const { datasets, id: projectId } = useProject();
 
@@ -120,6 +106,27 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             invalidates: [['get', '/api/jobs']],
         },
     });
+
+    // Everything the job needs is picked on the setup step, so that is the only
+    // step that can block progress; the later steps are free to be skipped through.
+    const isSetupIncomplete =
+        !selectedDataset ||
+        !selectedPolicy ||
+        remoteTrainerId === null ||
+        remoteUnavailable ||
+        policyAccessBlocksTraining;
+
+    const currentStepIndex = WIZARD_STEPS.indexOf(currentStep);
+    const isLastStep = currentStepIndex === WIZARD_STEPS.length - 1;
+    const completedSteps = useMemo(() => new Set(WIZARD_STEPS.slice(0, currentStepIndex)), [currentStepIndex]);
+
+    const goToStep = (offset: number) => {
+        const nextStep = WIZARD_STEPS[currentStepIndex + offset];
+
+        if (nextStep !== undefined) {
+            setCurrentStep(nextStep);
+        }
+    };
 
     const save = async () => {
         const dataset_id = selectedDataset?.toString();
@@ -185,52 +192,34 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             <Divider />
             <Content width={'700px'}>
                 <Flex direction='column' gap='size-200' width='100%'>
-                    {remoteUnavailable && (
-                        <InlineAlert variant='warning'>
-                            Can&apos;t reach the remote trainer, so training can&apos;t start. Make sure it&apos;s
-                            running, then try again.
-                        </InlineAlert>
-                    )}
-
-                    <Picker
-                        label='Dataset'
-                        selectedKey={selectedDataset}
-                        onSelectionChange={setSelectedDataset}
-                        width='100%'
-                    >
-                        {datasets.map((dataset) => (
-                            <Item key={dataset.id}>{dataset.name}</Item>
-                        ))}
-                    </Picker>
-
-                    <Picker
-                        label='Run on'
-                        selectedKey={remoteTrainerId}
-                        onSelectionChange={setRemoteTrainerId}
-                        width='100%'
-                        items={trainingTargetOptions}
-                    >
-                        {(trainingTarget) => <Item key={trainingTarget.id}>{trainingTarget.label}</Item>}
-                    </Picker>
-
-                    <PolicySelection
-                        selectedPolicy={selectedPolicy}
-                        onSelectionChange={setSelectedPolicy}
-                        isDisabled={baseModel !== undefined}
-                        trainingDevice={activeDevice}
+                    <Stepper
+                        steps={[...WIZARD_STEPS]}
+                        currentStep={currentStep}
+                        completedSteps={completedSteps}
+                        labels={WIZARD_STEP_LABELS}
+                        onGoToStep={setCurrentStep}
                     />
-                    <PolicyAccessAlert policy={selectedPolicy} />
 
-                    <Disclosure
-                        isQuiet
-                        UNSAFE_style={{ padding: 0 }}
-                        UNSAFE_className={classes.advancedSettingsDisclosure}
-                        defaultExpanded={bestDevice?.type !== 'cuda'}
-                    >
-                        <DisclosureTitle UNSAFE_style={{ fontSize: 13, padding: '4px 0' }}>
-                            Advanced settings
-                        </DisclosureTitle>
-                        <DisclosurePanel UNSAFE_style={{ padding: 0 }}>
+                    <View minHeight='size-3600'>
+                        {currentStep === 'setup' && (
+                            <SetupStep
+                                datasets={datasets}
+                                selectedDataset={selectedDataset}
+                                onSelectedDatasetChange={setSelectedDataset}
+                                trainingTargetOptions={trainingTargetOptions}
+                                remoteTrainerId={remoteTrainerId}
+                                onRemoteTrainerIdChange={setRemoteTrainerId}
+                                remoteUnavailable={remoteUnavailable}
+                                selectedPolicy={selectedPolicy}
+                                onSelectedPolicyChange={setSelectedPolicy}
+                                isPolicyDisabled={baseModel !== undefined}
+                                activeDevice={activeDevice}
+                            />
+                        )}
+
+                        {currentStep === 'feature-mapping' && <FeatureMappingStep />}
+
+                        {currentStep === 'training-parameters' && (
                             <TrainingParameters
                                 maxEpochs={maxEpochs}
                                 onMaxEpochsChange={setMaxEpochs}
@@ -247,27 +236,28 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 isAutoScaleBatchDisabled={activeDevice?.type !== 'cuda'}
                                 deviceType={activeDevice?.type}
                             />
-                        </DisclosurePanel>
-                    </Disclosure>
+                        )}
+
+                        {currentStep === 'export' && <ExportStep />}
+                    </View>
                 </Flex>
             </Content>
             <ButtonGroup>
                 <Button variant='secondary' onPress={() => close(undefined)}>
                     Cancel
                 </Button>
-                <Button
-                    variant='accent'
-                    onPress={save}
-                    isDisabled={
-                        !selectedDataset ||
-                        !selectedPolicy ||
-                        remoteTrainerId === null ||
-                        remoteUnavailable ||
-                        policyAccessBlocksTraining
-                    }
-                >
-                    Train
+                <Button variant='secondary' onPress={() => goToStep(-1)} isDisabled={currentStepIndex === 0}>
+                    Back
                 </Button>
+                {isLastStep ? (
+                    <Button variant='accent' onPress={save} isDisabled={isSetupIncomplete}>
+                        Train
+                    </Button>
+                ) : (
+                    <Button variant='accent' onPress={() => goToStep(1)} isDisabled={isSetupIncomplete}>
+                        Next
+                    </Button>
+                )}
             </ButtonGroup>
         </Dialog>
     );
