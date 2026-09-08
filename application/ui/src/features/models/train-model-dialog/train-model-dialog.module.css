@@ -11,3 +11,14 @@
     --spectrum-alias-background-color-default: var(--spectrum-global-color-gray-200);
     --spectrum-alias-background-color-informative: var(--selection-dark-blue, #0c1e29);
 }
+
+.summaryLabel {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--spectrum-global-color-gray-600);
+}
+
+.summaryValue {
+    font-size: 13px;
+}

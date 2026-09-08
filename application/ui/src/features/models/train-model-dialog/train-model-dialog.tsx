@@ -6,15 +6,16 @@ import { $api } from '../../../api/client';
 import { SchemaTrainJob as SchemaJob, SchemaModel } from '../../../api/openapi-spec';
 import { useProject } from '../../projects/use-project';
 import { useRemoteTrainerHealth } from '../../remote-trainers/use-remote-trainer-health';
-import { Stepper } from '../../robots/setup-wizard/shared/stepper';
 import { ExportStep } from './export-step';
 import { FeatureMappingStep } from './feature-mapping-step';
-import { MODELS } from './policies';
+import { formatBytes, MODELS } from './policies';
 import { SetupStep } from './setup-step';
 import { TrainingDeviceInfo } from './training-device-info';
 import { TrainingParameters } from './training-parameters';
+import { TrainingSummaryNote } from './training-summary-note';
+import { useFeatureMapping } from './use-feature-mapping';
 import { pickBestDevice, useBestTrainingDevice } from './use-training-devices';
-import { WIZARD_STEP_LABELS, WIZARD_STEPS, WizardStep } from './wizard-steps';
+import { getWizardSteps, WizardStep } from './wizard-steps';
 
 export type SchemaTrainJob = Omit<SchemaJob, 'payload'> & {
     payload: SchemaJob['payload'];
@@ -101,6 +102,10 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
         }
     }, [activeDevice]);
 
+    // Cameras are mapped onto the policy's fixed camera slots; the mapping lives
+    // here so the step can be left and re-entered without losing it.
+    const featureMapping = useFeatureMapping(selectedPolicy, selectedDataset?.toString());
+
     const trainMutation = $api.useMutation('post', '/api/jobs:train', {
         meta: {
             invalidates: [['get', '/api/jobs']],
@@ -116,12 +121,33 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
         remoteUnavailable ||
         policyAccessBlocksTraining;
 
-    const currentStepIndex = WIZARD_STEPS.indexOf(currentStep);
-    const isLastStep = currentStepIndex === WIZARD_STEPS.length - 1;
-    const completedSteps = useMemo(() => new Set(WIZARD_STEPS.slice(0, currentStepIndex)), [currentStepIndex]);
+    // A policy without a fixed camera order has no feature-mapping step at all,
+    // so the steps -- and their numbering -- follow the selected policy.
+    const steps = useMemo(() => getWizardSteps(selectedPolicy), [selectedPolicy]);
+    // Switching to a policy that skips a step can leave `currentStep` behind, and
+    // the setup step is the only one every policy has.
+    const activeStep = steps.includes(currentStep) ? currentStep : 'setup';
+    const currentStepIndex = steps.indexOf(activeStep);
+    const isLastStep = currentStepIndex === steps.length - 1;
+
+    const isStepBlocked = isSetupIncomplete || (activeStep === 'feature-mapping' && featureMapping.error !== null);
+
+    // What the later steps recap: the trainer that runs the job and the device it
+    // trains on, plus the dataset and policy the run is about.
+    const trainingTargetLabel =
+        trainingTargetOptions.find((option) => option.id === remoteTrainerId)?.label ?? 'This machine (local)';
+    const summaryDevice =
+        activeDevice === null || activeDevice === undefined
+            ? trainingTargetLabel
+            : `${trainingTargetLabel} — ${activeDevice.name}${
+                  activeDevice.memory ? `, ${formatBytes(activeDevice.memory)}` : ''
+              }`;
+    const selectedDatasetName =
+        datasets.find((dataset) => dataset.id === selectedDataset?.toString())?.name ?? 'No dataset';
+    const selectedPolicyName = MODELS.find((model) => model.id === selectedPolicy)?.name ?? selectedPolicy;
 
     const goToStep = (offset: number) => {
-        const nextStep = WIZARD_STEPS[currentStepIndex + offset];
+        const nextStep = steps[currentStepIndex + offset];
 
         if (nextStep !== undefined) {
             setCurrentStep(nextStep);
@@ -146,6 +172,10 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
 
         const name = baseModel?.name ?? MODELS.find((policy) => policy.id === selectedPolicy)?.name ?? '';
 
+        // NOTE: the camera mapping (`featureMapping.imageKeyReorderMap` and
+        // `numCameras`) is not sent yet — the train payload has no field for it and
+        // forbids unknown ones. Wiring it through TrainJobPayload -> TrainingJobSpec
+        // -> build_policy is what makes the feature-mapping step take effect.
         const commonPayload = {
             dataset_id,
             project_id: projectId,
@@ -192,16 +222,16 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             <Divider />
             <Content width={'700px'}>
                 <Flex direction='column' gap='size-200' width='100%'>
-                    <Stepper
-                        steps={[...WIZARD_STEPS]}
-                        currentStep={currentStep}
-                        completedSteps={completedSteps}
-                        labels={WIZARD_STEP_LABELS}
-                        onGoToStep={setCurrentStep}
-                    />
+                    {activeStep !== 'setup' && (
+                        <TrainingSummaryNote
+                            device={summaryDevice}
+                            dataset={selectedDatasetName}
+                            policy={selectedPolicyName}
+                        />
+                    )}
 
                     <View minHeight='size-3600'>
-                        {currentStep === 'setup' && (
+                        {activeStep === 'setup' && (
                             <SetupStep
                                 datasets={datasets}
                                 selectedDataset={selectedDataset}
@@ -217,9 +247,11 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                             />
                         )}
 
-                        {currentStep === 'feature-mapping' && <FeatureMappingStep />}
+                        {activeStep === 'feature-mapping' && (
+                            <FeatureMappingStep policy={selectedPolicy} mapping={featureMapping} />
+                        )}
 
-                        {currentStep === 'training-parameters' && (
+                        {activeStep === 'training-parameters' && (
                             <TrainingParameters
                                 maxEpochs={maxEpochs}
                                 onMaxEpochsChange={setMaxEpochs}
@@ -238,7 +270,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                             />
                         )}
 
-                        {currentStep === 'export' && <ExportStep />}
+                        {activeStep === 'export' && <ExportStep />}
                     </View>
                 </Flex>
             </Content>
@@ -250,11 +282,11 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                     Back
                 </Button>
                 {isLastStep ? (
-                    <Button variant='accent' onPress={save} isDisabled={isSetupIncomplete}>
+                    <Button variant='accent' onPress={save} isDisabled={isStepBlocked}>
                         Train
                     </Button>
                 ) : (
-                    <Button variant='accent' onPress={() => goToStep(1)} isDisabled={isSetupIncomplete}>
+                    <Button variant='accent' onPress={() => goToStep(1)} isDisabled={isStepBlocked}>
                         Next
                     </Button>
                 )}

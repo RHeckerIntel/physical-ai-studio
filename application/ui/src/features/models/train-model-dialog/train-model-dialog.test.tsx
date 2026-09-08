@@ -67,6 +67,23 @@ const mockProjectWithRemoteTrainer = () => {
                 huggingface: { hf_token: null },
             })
         ),
+        http.get('/api/dataset/{dataset_id}/episodes', () =>
+            HttpResponse.json([{ episode_index: 0, tasks: ['Test task'], length: 100, fps: 30 }])
+        ),
+        http.get('/api/dataset/{dataset_id}/episodes/{episode_index}', () =>
+            HttpResponse.json({
+                episode_index: 0,
+                length: 100,
+                fps: 30,
+                tasks: ['Test task'],
+                actions: [],
+                action_keys: [],
+                videos: {
+                    'observation.images.top': { start: 0, end: 3, path: 'top.mp4' },
+                    'observation.images.wrist': { start: 0, end: 3, path: 'wrist.mp4' },
+                },
+            })
+        ),
         http.get('/api/policies/{policy}/huggingface-access', ({ params }) => {
             const policy = params.policy;
             return HttpResponse.json({
@@ -93,9 +110,10 @@ const renderDialog = (props: { baseModel?: SchemaModel } = {}) =>
     });
 
 // Training is submitted from the last wizard step, so a test that wants to press
-// Train has to walk through the steps in between first.
+// Train has to walk through the steps in between first. How many those are depends
+// on the policy, so walk until Train shows up.
 const goToLastStep = async (user: ReturnType<typeof userEvent.setup>) => {
-    for (let step = 0; step < 3; step++) {
+    while (screen.queryByRole('button', { name: 'Next' }) !== null) {
         await user.click(screen.getByRole('button', { name: 'Next' }));
     }
 };
@@ -216,6 +234,41 @@ describe('TrainModelDialog', () => {
         expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
     });
 
+    it('maps the dataset cameras onto the SmolVLA camera slots in dataset order', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await user.click(screen.getByLabelText('Select SmolVLA policy'));
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+
+        // The dataset's two cameras fill the first two slots; the third stays empty.
+        expect(await screen.findByLabelText(/Overview/i, { selector: 'button' })).toHaveTextContent('top');
+        expect(screen.getByLabelText(/Gripper/i, { selector: 'button' })).toHaveTextContent('wrist');
+        expect(screen.getByLabelText(/Extra/i, { selector: 'button' })).toHaveTextContent('Empty');
+        expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled();
+    });
+
+    it('blocks the mapping step while a dataset camera fills no slot', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await user.click(screen.getByLabelText('Select SmolVLA policy'));
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+
+        // Emptying the Gripper slot leaves 'wrist' mapped to nothing at all.
+        await user.click(await screen.findByLabelText(/Gripper/i, { selector: 'button' }));
+        await user.click(await screen.findByRole('option', { name: 'Empty' }));
+
+        expect(await screen.findByText(/wrist is not mapped yet/i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    });
+
     it('walks through the wizard steps and back', async () => {
         const user = userEvent.setup();
         mockProjectWithRemoteTrainer();
@@ -224,11 +277,14 @@ describe('TrainModelDialog', () => {
         await user.click(await screen.findByRole('button', { name: /select…/i }));
         await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
 
-        await user.click(screen.getByRole('button', { name: 'Next' }));
-        expect(await screen.findByText(/Mapping dataset features/i)).toBeInTheDocument();
-
+        // ACT has no fixed camera order, so Next lands on the training parameters
+        // rather than on a feature-mapping step.
         await user.click(screen.getByRole('button', { name: 'Next' }));
         expect(await screen.findByRole('slider', { name: /batch size/i })).toBeInTheDocument();
+
+        // Every step past the first recaps what the setup step settled.
+        expect(screen.getByText('Test dataset')).toBeInTheDocument();
+        expect(screen.getByText('ACT')).toBeInTheDocument();
 
         await user.click(screen.getByRole('button', { name: 'Next' }));
         expect(await screen.findByText(/Export format and optimization settings/i)).toBeInTheDocument();
