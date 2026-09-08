@@ -180,12 +180,6 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
 
         const name = baseModel?.name ?? MODELS.find((policy) => policy.id === selectedPolicy)?.name ?? '';
 
-        // NOTE: neither the camera mapping (`featureMapping.imageKeyReorderMap` and
-        // `numCameras`) nor the export selection (`exportSelection.selectedBackends`)
-        // is sent yet — the train payload has no field for either and forbids unknown
-        // ones. Wiring them through TrainJobPayload -> TrainingJobSpec (-> build_policy
-        // for the mapping, -> _export for the formats) is what makes those steps take
-        // effect; until then every supported format is exported.
         const commonPayload = {
             dataset_id,
             project_id: projectId,
@@ -197,6 +191,11 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             auto_scale_batch_size: autoScaleBatchSize,
             precision: (precision?.toString() ?? 'bf16-mixed') as SchemaJob['payload']['precision'],
             compile_model: compileModel,
+            // Empty for a policy that has no fixed camera order, which is what the
+            // training side reads as "keep the dataset's own order".
+            image_key_reorder_map: featureMapping.imageKeyReorderMap,
+            num_cameras: featureMapping.numCameras,
+            export_backends: exportSelection.selectedBackends,
             val_split: 0.1,
             ...extraPayload,
         } as const;

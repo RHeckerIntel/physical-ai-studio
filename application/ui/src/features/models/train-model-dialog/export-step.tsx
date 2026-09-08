@@ -1,6 +1,7 @@
 import { Checkbox, CheckboxGroup, Flex, ProgressCircle, Text } from '@geti-ui/ui';
 
 import { InlineAlert } from '../../robots/setup-wizard/shared/inline-alert';
+import { isExportBackend } from '../inference-backends';
 import { InferenceBackendLogo } from '../model-formats/backend-card';
 import { MODELS } from './policies';
 import { ExportSelection } from './use-export-backends';
@@ -51,7 +52,7 @@ export const ExportStep = ({ policy, selection }: ExportStepProps) => {
                 width='100%'
                 aria-label='Export formats'
                 value={selectedBackends}
-                onChange={setSelectedBackends}
+                onChange={(selected) => setSelectedBackends(selected.filter(isExportBackend))}
             >
                 {backends.map((backend) => (
                     <Checkbox key={backend.type} value={backend.type} UNSAFE_className={classes.exportFormatOption}>

@@ -309,6 +309,59 @@ describe('TrainModelDialog', () => {
         expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
     });
 
+    it('submits the camera mapping and the picked export formats', async () => {
+        const user = userEvent.setup();
+        let submitted: Record<string, unknown> | null = null;
+
+        mockProjectWithRemoteTrainer();
+        server.use(
+            http.post('/api/jobs:train', async ({ request }) => {
+                submitted = (await request.json()) as Record<string, unknown>;
+                return HttpResponse.json({}, { status: 201 });
+            })
+        );
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await user.click(screen.getByLabelText('Select SmolVLA policy'));
+        await goToLastStep(user);
+        await user.click(await screen.findByRole('checkbox', { name: /PyTorch/i }));
+        await user.click(screen.getByRole('button', { name: 'Train' }));
+
+        await waitFor(() => expect(submitted).not.toBeNull());
+        expect(submitted).toMatchObject({
+            // Keyed by camera name: the policy reads its images as `images.<name>`,
+            // so the dataset's `observation.images.` prefix must not ride along.
+            image_key_reorder_map: { top: 0, wrist: 1 },
+            num_cameras: 3,
+            export_backends: ['openvino'],
+        });
+    });
+
+    it('sends no camera mapping for a policy without a fixed camera order', async () => {
+        const user = userEvent.setup();
+        let submitted: Record<string, unknown> | null = null;
+
+        mockProjectWithRemoteTrainer();
+        server.use(
+            http.post('/api/jobs:train', async ({ request }) => {
+                submitted = (await request.json()) as Record<string, unknown>;
+                return HttpResponse.json({}, { status: 201 });
+            })
+        );
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await goToLastStep(user);
+        await user.click(screen.getByRole('button', { name: 'Train' }));
+
+        await waitFor(() => expect(submitted).not.toBeNull());
+        expect(submitted).toMatchObject({ image_key_reorder_map: {}, num_cameras: 0 });
+        expect(submitted).toHaveProperty('export_backends', ['torch', 'openvino', 'onnx', 'executorch']);
+    });
+
     it('walks through the wizard steps and back', async () => {
         const user = userEvent.setup();
         mockProjectWithRemoteTrainer();

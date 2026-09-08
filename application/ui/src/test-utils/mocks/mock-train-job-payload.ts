@@ -21,6 +21,7 @@ const basePayload = {
     val_split: 0.1,
     precision: 'bf16-mixed' as const,
     compile_model: false,
+    num_cameras: 0,
 };
 
 type BaseKeys = keyof typeof basePayload;
