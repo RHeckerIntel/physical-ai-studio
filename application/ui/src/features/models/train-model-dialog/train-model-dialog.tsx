@@ -13,6 +13,7 @@ import { SetupStep } from './setup-step';
 import { TrainingDeviceInfo } from './training-device-info';
 import { TrainingParameters } from './training-parameters';
 import { TrainingSummaryNote } from './training-summary-note';
+import { useExportBackends } from './use-export-backends';
 import { useFeatureMapping } from './use-feature-mapping';
 import { pickBestDevice, useBestTrainingDevice } from './use-training-devices';
 import { getWizardSteps, WizardStep } from './wizard-steps';
@@ -106,6 +107,10 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     // here so the step can be left and re-entered without losing it.
     const featureMapping = useFeatureMapping(selectedPolicy, selectedDataset?.toString());
 
+    // Which formats the trained model is exported to; the policy decides what is
+    // on offer.
+    const exportSelection = useExportBackends(selectedPolicy);
+
     const trainMutation = $api.useMutation('post', '/api/jobs:train', {
         meta: {
             invalidates: [['get', '/api/jobs']],
@@ -130,7 +135,10 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const currentStepIndex = steps.indexOf(activeStep);
     const isLastStep = currentStepIndex === steps.length - 1;
 
-    const isStepBlocked = isSetupIncomplete || (activeStep === 'feature-mapping' && featureMapping.error !== null);
+    const isStepBlocked =
+        isSetupIncomplete ||
+        (activeStep === 'feature-mapping' && featureMapping.error !== null) ||
+        (activeStep === 'export' && exportSelection.error !== null);
 
     // What the later steps recap: the trainer that runs the job and the device it
     // trains on, plus the dataset and policy the run is about.
@@ -172,10 +180,12 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
 
         const name = baseModel?.name ?? MODELS.find((policy) => policy.id === selectedPolicy)?.name ?? '';
 
-        // NOTE: the camera mapping (`featureMapping.imageKeyReorderMap` and
-        // `numCameras`) is not sent yet — the train payload has no field for it and
-        // forbids unknown ones. Wiring it through TrainJobPayload -> TrainingJobSpec
-        // -> build_policy is what makes the feature-mapping step take effect.
+        // NOTE: neither the camera mapping (`featureMapping.imageKeyReorderMap` and
+        // `numCameras`) nor the export selection (`exportSelection.selectedBackends`)
+        // is sent yet — the train payload has no field for either and forbids unknown
+        // ones. Wiring them through TrainJobPayload -> TrainingJobSpec (-> build_policy
+        // for the mapping, -> _export for the formats) is what makes those steps take
+        // effect; until then every supported format is exported.
         const commonPayload = {
             dataset_id,
             project_id: projectId,
@@ -270,7 +280,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                             />
                         )}
 
-                        {activeStep === 'export' && <ExportStep />}
+                        {activeStep === 'export' && <ExportStep policy={selectedPolicy} selection={exportSelection} />}
                     </View>
                 </Flex>
             </Content>

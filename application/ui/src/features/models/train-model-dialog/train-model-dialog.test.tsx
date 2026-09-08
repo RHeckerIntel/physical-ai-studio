@@ -67,6 +67,13 @@ const mockProjectWithRemoteTrainer = () => {
                 huggingface: { hf_token: null },
             })
         ),
+        http.get('/api/policies/backends', () =>
+            HttpResponse.json({
+                act: ['torch', 'openvino', 'onnx', 'executorch'],
+                smolvla: ['torch', 'openvino'],
+                pi05: ['torch', 'openvino'],
+            })
+        ),
         http.get('/api/dataset/{dataset_id}/episodes', () =>
             HttpResponse.json([{ episode_index: 0, tasks: ['Test task'], length: 100, fps: 30 }])
         ),
@@ -269,6 +276,39 @@ describe('TrainModelDialog', () => {
         expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
     });
 
+    it('offers only the export formats the policy supports', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await user.click(screen.getByLabelText('Select SmolVLA policy'));
+        await goToLastStep(user);
+
+        // SmolVLA traces to Torch and OpenVINO only.
+        expect(await screen.findByRole('checkbox', { name: /PyTorch/i })).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', { name: /OpenVINO/i })).toBeInTheDocument();
+        expect(screen.queryByRole('checkbox', { name: /ONNX/i })).not.toBeInTheDocument();
+    });
+
+    it('blocks training when no export format is picked', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await goToLastStep(user);
+
+        for (const format of [/PyTorch/i, /OpenVINO/i, /ONNX/i, /ExecuTorch/i]) {
+            await user.click(await screen.findByRole('checkbox', { name: format }));
+        }
+
+        expect(await screen.findByText(/at least one export format/i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Train' })).toBeDisabled();
+    });
+
     it('walks through the wizard steps and back', async () => {
         const user = userEvent.setup();
         mockProjectWithRemoteTrainer();
@@ -287,7 +327,9 @@ describe('TrainModelDialog', () => {
         expect(screen.getByText('ACT')).toBeInTheDocument();
 
         await user.click(screen.getByRole('button', { name: 'Next' }));
-        expect(await screen.findByText(/Export format and optimization settings/i)).toBeInTheDocument();
+        // ACT exports to all four formats, and all of them are picked by default.
+        expect(await screen.findByRole('checkbox', { name: /PyTorch/i })).toBeChecked();
+        expect(screen.getByRole('checkbox', { name: /ExecuTorch/i })).toBeChecked();
         expect(screen.getByRole('button', { name: 'Train' })).toBeEnabled();
 
         await user.click(screen.getByRole('button', { name: 'Back' }));
