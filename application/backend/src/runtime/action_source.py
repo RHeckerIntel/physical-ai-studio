@@ -128,6 +128,9 @@ class StudioActionSource:
             return leader_action
         if self._follower_source == "policy" and policy_action is not None:
             return policy_action
+        if self._follower_source == "hold" and self._leader is not None:
+            self._leader.send_action(robot_state)
+
         return self._hold_target.copy()
 
     def disconnect(self) -> None:
