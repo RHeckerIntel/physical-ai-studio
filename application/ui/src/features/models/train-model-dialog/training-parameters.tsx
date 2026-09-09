@@ -164,51 +164,49 @@ export const TrainingParameters = ({
                 <Item key='16'>16</Item>
             </Picker>
         </Flex>
-        <Flex direction='row' gap='size-150' width='100%'>
-            <Picker
-                width='100%'
-                label='Precision'
-                description={
-                    deviceType
-                        ? `${
-                              PRECISION_LABELS[RECOMMENDED_PRECISION[deviceType] ?? '32-true']
-                          } recommended for ${deviceType.toUpperCase()}`
-                        : undefined
-                }
-                selectedKey={precision}
-                onSelectionChange={onPrecisionChange}
-                contextualHelp={
-                    <ContextualHelp variant='info'>
-                        <Heading>Training precision</Heading>
-                        <Content>
-                            <Text>
-                                Controls numerical precision during training. BF16 Mixed uses half-precision where safe
-                                for faster training and lower memory usage. BF16 True runs entirely in BF16 for maximum
-                                speed. 32-bit uses full precision for maximum numerical stability.
-                            </Text>
-                        </Content>
-                    </ContextualHelp>
-                }
-            >
-                <Item key='bf16-mixed'>BF16 Mixed</Item>
-                <Item key='bf16-true'>BF16 True</Item>
-                <Item key='32-true'>32-bit</Item>
-            </Picker>
-            <Flex direction='column' gap='size-150' width='100%' justifyContent='center'>
-                <Flex direction='row' gap='size-100' alignItems='center'>
-                    <Checkbox isEmphasized isSelected={compileModel} onChange={onCompileModelChange}>
-                        Compile model
-                    </Checkbox>
-                    <ContextualHelp variant='info'>
-                        <Heading>Compile model</Heading>
-                        <Content>
-                            <Text>
-                                Enables torch.compile for all policies. Can significantly speed up training after an
-                                initial compilation warmup, but increases startup time.
-                            </Text>
-                        </Content>
-                    </ContextualHelp>
-                </Flex>
+        <Picker
+            width='100%'
+            label='Precision'
+            description={
+                deviceType
+                    ? `${
+                          PRECISION_LABELS[RECOMMENDED_PRECISION[deviceType] ?? '32-true']
+                      } recommended for ${deviceType.toUpperCase()}`
+                    : undefined
+            }
+            selectedKey={precision}
+            onSelectionChange={onPrecisionChange}
+            contextualHelp={
+                <ContextualHelp variant='info'>
+                    <Heading>Training precision</Heading>
+                    <Content>
+                        <Text>
+                            Controls numerical precision during training. BF16 Mixed uses half-precision where safe for
+                            faster training and lower memory usage. BF16 True runs entirely in BF16 for maximum speed.
+                            32-bit uses full precision for maximum numerical stability.
+                        </Text>
+                    </Content>
+                </ContextualHelp>
+            }
+        >
+            <Item key='bf16-mixed'>BF16 Mixed</Item>
+            <Item key='bf16-true'>BF16 True</Item>
+            <Item key='32-true'>32-bit</Item>
+        </Picker>
+        <Flex direction='column' gap='size-150' width='100%' justifyContent='center'>
+            <Flex direction='row' gap='size-100' alignItems='center'>
+                <Checkbox isEmphasized isSelected={compileModel} onChange={onCompileModelChange}>
+                    Compile model
+                </Checkbox>
+                <ContextualHelp variant='info'>
+                    <Heading>Compile model</Heading>
+                    <Content>
+                        <Text>
+                            Enables torch.compile for all policies. Can significantly speed up training after an initial
+                            compilation warmup, but increases startup time and memory footprint.
+                        </Text>
+                    </Content>
+                </ContextualHelp>
             </Flex>
         </Flex>
     </Flex>

@@ -44,7 +44,7 @@ export const ExportStep = ({ policy, selection }: ExportStepProps) => {
         <Flex direction='column' gap='size-200' width='100%'>
             <Text>
                 Export the trained {policyName} model to the runtimes you want to deploy it on. Each format is converted
-                after training, so leaving one out only means it has to be retrained to get it.
+                after training.
             </Text>
 
             <CheckboxGroup
