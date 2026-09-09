@@ -21,6 +21,8 @@ from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_P
 from physicalai.data.observation import ACTION, IMAGES
 from physicalai.policies.base import Model
 from physicalai.policies.mixins import SnapFlowModelMixin
+from physicalai.policies.mixins.peft import PeftModelMixin
+from physicalai.policies.utils import in_episode_bound, reduce_losses
 
 from .pi_gemma import (
     PaliGemmaForConditionalGenerationWithPiGemma,
@@ -537,12 +539,52 @@ class PaliGemmaWithExpertModel(nn.Module):
         return [prefix_output, suffix_output], prefix_past_key_values
 
 
-class Pi05Model(SnapFlowModelMixin, Model):
+class Pi05Model(PeftModelMixin, SnapFlowModelMixin, Model):
     """Core Pi05 PyTorch model for flow matching VLA.
 
     This is the nn.Module that contains the actual model logic,
     separated from the Lightning wrapper.
     """
+
+    @classmethod
+    def get_default_peft_targets(cls) -> str:
+        """Return the default LoRA target modules for Pi05.
+
+        Targets the full attention block (`q`/`k`/`v`/`o_proj`) and MLP (`gate`/`up`/
+        `down_proj`) of *both* the action expert and the PaliGemma VLM's language model,
+        plus the action/time projection heads.
+
+        Two design choices drive this, deliberately going wider than a q/v-attention-only,
+        action-expert-only adapter set:
+
+        1. VLM coverage: adapting only the action expert starves LoRA of the same "the VLM
+           needs to adapt too" signal that full fine-tuning relies on (see
+           `freeze_vision_encoder`/`train_expert_only`, which default to training the whole
+           VLM) -- important when the task requires new visual/language groundings, not
+           just new action-space mappings.
+        2. Full attention + MLP: the original LoRA paper's own ablation (Hu et al. 2021,
+           Table 6) found that spreading a fixed parameter budget across more weight-matrix
+           types at lower rank outperforms concentrating it in fewer types at higher rank
+           (e.g. adapting {q,k,v,o} at rank 4 beat {q,v} alone at rank 16). MLP matrices
+           also hold the bulk of a transformer block's parameters, so q/v-only attention
+           adaptation touches a disproportionately small slice of model capacity. Note that
+           with `num_kv_heads=1` (GQA) in these Gemma variants, `k_proj`/`v_proj` are cheap
+           to adapt (output dim is just `head_dim`), so the "full attention" addition here
+           is mostly `q_proj`/`o_proj` plus MLP.
+
+        The vision tower (SigLIP backbone) is still excluded by default; pass an explicit
+        `lora_target_modules` to include it if needed. Excludes the SnapFlow-only
+        `target_time_mlp_*` heads.
+
+        Returns:
+            A regex string matching the default LoRA-adapted submodule names.
+        """
+        attn_and_mlp = r"(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)"
+        return (
+            rf"(.*\.gemma_expert\..*\.{attn_and_mlp}|"
+            rf".*\.paligemma\.model\.language_model\..*\.{attn_and_mlp}|"
+            r"(action_in_proj|action_out_proj|time_mlp_in|time_mlp_out))"
+        )
 
     def __init__(  # noqa: PLR0913
         self,
@@ -1041,9 +1083,14 @@ class Pi05Model(SnapFlowModelMixin, Model):
         and target velocities.  When SnapFlow is enabled, uses a mixture
         of standard FM loss and consistency distillation loss.
 
+        Action steps flagged by ``extra.action_is_pad`` are excluded from both
+        the numerator and the denominator, so end-of-episode padding neither
+        supervises the policy nor scales down the gradient.
+
         Args:
             batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
-                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION.
+                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION, and
+                optionally ``extra.action_is_pad``.
 
         Returns:
             Tuple of (mean loss tensor, loss dict with ``"loss"`` key).
@@ -1064,6 +1111,7 @@ class Pi05Model(SnapFlowModelMixin, Model):
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        cd_idx: Tensor | None = None
         if not self._snapflow_enabled:
             v_t = self._predict_velocity(
                 x_t,
@@ -1075,7 +1123,7 @@ class Pi05Model(SnapFlowModelMixin, Model):
             )
             losses = F.mse_loss(u_t, v_t, reduction="none")
         else:
-            losses = self.snapflow_mixed_loss(
+            losses, cd_idx = self.snapflow_mixed_loss(
                 u_t=u_t,
                 x_t=x_t,
                 time=time,
@@ -1087,11 +1135,15 @@ class Pi05Model(SnapFlowModelMixin, Model):
                 predict_velocity=self._predict_velocity,
             )
 
+        # Mask out action steps that only exist because the chunk query was
+        # clamped at an episode boundary.
+        bound = in_episode_bound(batch, cd_idx)
+
         # Truncate losses to actual action dimensions to avoid dilution from padding
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
         losses = losses[:, :, :original_action_dim]
 
-        loss = losses.mean()
+        loss = reduce_losses(losses, bound)
         # Detached tensor, not `.item()` float: see Model.compute_loss docstring.
         return loss, {"loss": loss.detach()}
 
@@ -1104,9 +1156,14 @@ class Pi05Model(SnapFlowModelMixin, Model):
         deterministic and gives a direct measure of action prediction
         quality — unlike the stochastic flow matching training loss.
 
+        Action steps flagged by ``extra.action_is_pad`` are excluded, so the
+        metric is not diluted by the repeated terminal actions LeRobot inserts
+        at episode boundaries.
+
         Args:
             batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
-                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION.
+                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION, and
+                optionally ``extra.action_is_pad``.
 
         Returns:
             Tuple of (mean MSE loss tensor, loss dict with ``"loss"`` key).
@@ -1121,7 +1178,12 @@ class Pi05Model(SnapFlowModelMixin, Model):
 
         # Align chunk lengths (predicted may be clipped by n_action_steps)
         min_len = min(gt_trimmed.shape[1], pred_trimmed.shape[1])
-        loss = F.mse_loss(pred_trimmed[:, :min_len], gt_trimmed[:, :min_len])
+        losses = F.mse_loss(pred_trimmed[:, :min_len], gt_trimmed[:, :min_len], reduction="none")
+
+        bound = in_episode_bound(batch)
+        if bound is not None:
+            bound = bound[:, :min_len]
+        loss = reduce_losses(losses, bound)
         return loss, {"loss": loss.item()}
 
     def predict_action_chunk(self, batch: dict[str, Any]) -> Tensor:

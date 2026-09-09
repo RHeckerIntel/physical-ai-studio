@@ -47,22 +47,26 @@ _ALLOWED_KWARGS: dict[str, frozenset[str]] = {
 }
 
 
-def build_camera_config(config: Camera, *, device: str | None = None) -> Config:
-    """Build the direct physicalai camera recipe for a Studio camera row."""
+def build_camera_config(config: Camera) -> Config:
+    """Build a camera configuration from a config schema."""
     class_path = _DRIVER_TO_CLASS_PATH[config.driver]
     allowed = _ALLOWED_KWARGS.get(config.driver, frozenset())
 
     payload = config.payload.model_dump()
     init_args: dict[str, Any] = {k: v for k, v in payload.items() if k in allowed and v is not None}
 
+    fingerprint = config.fingerprint
+    if not fingerprint:
+        raise ValueError("Camera must be reselected")
+
     if config.driver == "usb_camera":
-        fingerprint = config.fingerprint
-        # Strip legacy ":N" sub-device suffix (e.g. "/dev/video0:0" → "/dev/video0").
-        if fingerprint.startswith("/dev/video") and ":" in fingerprint:
-            fingerprint = fingerprint.split(":")[0]
-        init_args["device"] = device or fingerprint
+        init_args["device"] = fingerprint
     elif config.driver != "ipcam":
-        init_args["serial_number"] = config.fingerprint
+        serial = fingerprint.get("serial")
+        if not isinstance(serial, str) or not serial:
+            raise ValueError(f"Camera fingerprint for {config.driver!r} must include a non-empty 'serial'")
+        init_args["serial_number"] = serial
+
     return Config(class_path, init_args)
 
 
