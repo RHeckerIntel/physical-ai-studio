@@ -200,6 +200,8 @@ def build_policy(spec: TrainingJobSpec, *, resume_from: Path | str | None = None
         The policy, compiled when ``spec.compile_model`` is set.
     """
     if resume_from is not None:
+        if spec.image_key_reorder_map or spec.num_cameras > 0:
+            logger.warning("Ignoring camera layout: a resumed policy keeps the layout stored in its checkpoint")
         return _load_policy_from_checkpoint(spec, Path(resume_from))
 
     from physicalai.policies import get_policy

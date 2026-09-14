@@ -136,8 +136,11 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
         policyAccessBlocksTraining;
 
     // A policy without a fixed camera order has no feature-mapping step at all,
-    // so the steps -- and their numbering -- follow the selected policy.
-    const steps = useMemo(() => getWizardSteps(selectedPolicy), [selectedPolicy]);
+    // and neither does retraining, so the steps -- and their numbering -- follow
+    // the selected policy.
+    const isRetraining = baseModel !== undefined;
+    const steps = useMemo(() => getWizardSteps(selectedPolicy, isRetraining), [selectedPolicy, isRetraining]);
+    const hasFeatureMapping = steps.includes('feature-mapping');
     // Switching to a policy that skips a step can leave `currentStep` behind, and
     // the setup step is the only one every policy has.
     const activeStep = steps.includes(currentStep) ? currentStep : 'setup';
@@ -146,7 +149,9 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
 
     const isStepBlocked =
         isSetupIncomplete ||
-        (activeStep === 'feature-mapping' && featureMapping.error !== null) ||
+        // Checked on every step from the mapping on, not just its own: the dataset's
+        // cameras can finish loading after Next was pressed and turn the mapping invalid.
+        (hasFeatureMapping && activeStep !== 'setup' && featureMapping.error !== null) ||
         (activeStep === 'export' && exportSelection.error !== null);
 
     // What the later steps recap: the trainer that runs the job and the device it
@@ -200,11 +205,14 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             auto_scale_batch_size: autoScaleBatchSize,
             precision: (precision?.toString() ?? 'bf16-mixed') as SchemaJob['payload']['precision'],
             compile_model: compileModel,
-            // Empty for a policy that has no fixed camera order, which is what the
-            // training side reads as "keep the dataset's own order".
-            image_key_reorder_map: featureMapping.imageKeyReorderMap,
-            num_cameras: featureMapping.numCameras,
-            export_backends: exportSelection.selectedBackends,
+            // Empty without a mapping step (no fixed camera order, or retraining),
+            // which the training side reads as "keep the order it already has".
+            image_key_reorder_map: hasFeatureMapping ? featureMapping.imageKeyReorderMap : {},
+            num_cameras: hasFeatureMapping ? featureMapping.numCameras : 0,
+            // With no formats on offer (the list failed to load, or is empty) there
+            // was nothing to choose from, so fall back to exporting every supported
+            // format rather than sending [] and exporting none.
+            export_backends: exportSelection.backends.length > 0 ? exportSelection.selectedBackends : null,
             snapflow_enabled: isSnapflowRequested,
             snapflow_distill_epochs: snapflowDistillEpochs,
             val_split: 0.1,

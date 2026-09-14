@@ -9,6 +9,8 @@ export type WizardStep = (typeof ALL_WIZARD_STEPS)[number];
  *
  * Only a policy pretrained on a fixed camera order has anything to map, so for
  * every other policy the feature-mapping step is dropped rather than shown empty.
+ * Retraining drops it too: a resumed policy keeps the camera layout stored in its
+ * checkpoint, so a mapping picked here would be ignored.
  */
-export const getWizardSteps = (policy: string): WizardStep[] =>
-    ALL_WIZARD_STEPS.filter((step) => step !== 'feature-mapping' || requiresFeatureMapping(policy));
+export const getWizardSteps = (policy: string, isRetraining = false): WizardStep[] =>
+    ALL_WIZARD_STEPS.filter((step) => step !== 'feature-mapping' || (requiresFeatureMapping(policy) && !isRetraining));

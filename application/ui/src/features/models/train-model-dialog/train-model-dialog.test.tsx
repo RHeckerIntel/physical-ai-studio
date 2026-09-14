@@ -457,6 +457,57 @@ describe('TrainModelDialog', () => {
         expect(submitted).toHaveProperty('export_backends', ['torch', 'openvino', 'onnx', 'executorch']);
     });
 
+    it('skips the camera mapping when retraining, since the checkpoint keeps its own', async () => {
+        const user = userEvent.setup();
+        let submitted: Record<string, unknown> | null = null;
+
+        mockProjectWithRemoteTrainer();
+        server.use(
+            http.post('/api/jobs:train', async ({ request }) => {
+                submitted = (await request.json()) as Record<string, unknown>;
+                return HttpResponse.json({}, { status: 201 });
+            })
+        );
+
+        renderDialog({ baseModel: { ...baseModel, policy: 'smolvla' } });
+        // The dataset is preselected from the base model, but Next stays disabled
+        // until the project has loaded it.
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+
+        expect(await screen.findByRole('slider', { name: /batch size/i })).toBeInTheDocument();
+
+        await goToLastStep(user);
+        await user.click(screen.getByRole('button', { name: 'Train' }));
+
+        await waitFor(() => expect(submitted).not.toBeNull());
+        expect(submitted).toMatchObject({ image_key_reorder_map: {}, num_cameras: 0 });
+    });
+
+    it('exports every supported format when the format list cannot be loaded', async () => {
+        const user = userEvent.setup();
+        let submitted: Record<string, unknown> | null = null;
+
+        mockProjectWithRemoteTrainer();
+        server.use(
+            http.get('/api/policies/backends', () => HttpResponse.json({ detail: [] }, { status: 500 })),
+            http.post('/api/jobs:train', async ({ request }) => {
+                submitted = (await request.json()) as Record<string, unknown>;
+                return HttpResponse.json({}, { status: 201 });
+            })
+        );
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await goToLastStep(user);
+        await user.click(screen.getByRole('button', { name: 'Train' }));
+
+        await waitFor(() => expect(submitted).not.toBeNull());
+        // `null` is "every format the policy supports"; `[]` would export none.
+        expect(submitted).toHaveProperty('export_backends', null);
+    });
+
     it('walks through the wizard steps and back', async () => {
         const user = userEvent.setup();
         mockProjectWithRemoteTrainer();

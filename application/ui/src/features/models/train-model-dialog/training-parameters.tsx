@@ -210,20 +210,20 @@ export const TrainingParameters = ({
                 <Item key='bf16-true'>BF16 True</Item>
                 <Item key='32-true'>32-bit</Item>
             </Picker>
-            <Flex direction='row' alignSelf={'end'} alignItems='center'>
-                <Checkbox isEmphasized isSelected={compileModel} onChange={onCompileModelChange}>
-                    Compile model
-                </Checkbox>
-                <ContextualHelp variant='info'>
-                    <Heading>Compile model</Heading>
-                    <Content>
-                        <Text>
-                            Enables torch.compile for all policies. Can significantly speed up training after an initial
-                            compilation warmup, but increases startup time.
-                        </Text>
-                    </Content>
-                </ContextualHelp>
-            </Flex>
+        </Flex>
+        <Flex direction='row' gap='size-200' width='100%'>
+            <Checkbox isEmphasized isSelected={compileModel} onChange={onCompileModelChange}>
+                Compile model
+            </Checkbox>
+            <ContextualHelp variant='info'>
+                <Heading>Compile model</Heading>
+                <Content>
+                    <Text>
+                        Enables torch.compile for all policies. Can significantly speed up training after an initial
+                        compilation warmup, but increases startup time.
+                    </Text>
+                </Content>
+            </ContextualHelp>
         </Flex>
         {isSnapflowSupported && (
             <Flex direction='row' gap='size-150' width='100%' alignItems='end'>
