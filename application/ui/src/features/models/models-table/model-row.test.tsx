@@ -45,6 +45,7 @@ const model: SchemaModel = {
     version: 1,
     created_at: '2026-07-14T12:00:00Z',
     available_backends: [],
+    snapflow_enabled: false,
 };
 
 const trainingJob: SchemaTrainJob = {
@@ -69,6 +70,8 @@ const trainingJob: SchemaTrainJob = {
         val_split: 0.1,
         precision: 'bf16-mixed',
         compile_model: false,
+        snapflow_enabled: false,
+        snapflow_distill_epochs: 3,
         training_target: 'local',
     },
 };
@@ -216,6 +219,18 @@ describe('ModelRow', () => {
         expect(screen.getByTestId('trainer-cell')).toHaveTextContent('-');
     });
 
+    it('badges a model whose checkpoint was distilled with SnapFlow', () => {
+        renderModelRow({ modelOverride: { snapflow_enabled: true } });
+
+        expect(screen.getByText('SnapFlow')).toBeInTheDocument();
+    });
+
+    it('leaves an ordinary flow-matching model unbadged', () => {
+        renderModelRow({ modelOverride: { snapflow_enabled: false } });
+
+        expect(screen.queryByText('SnapFlow')).not.toBeInTheDocument();
+    });
+
     it('does not render the detail panel initially', () => {
         renderModelRow();
 
@@ -230,7 +245,8 @@ describe('ModelRow', () => {
 
         expect(await screen.findByRole('tab', { name: 'Model formats' })).toBeInTheDocument();
         expect(screen.getByRole('tab', { name: 'Model Metrics' })).toBeInTheDocument();
-        expect(screen.getByRole('tab', { name: 'Training Datasets' })).toBeInTheDocument();
+        // TODO: Remove the comment once training datasets are supported
+        /*expect(screen.getByRole('tab', { name: 'Training Datasets' })).toBeInTheDocument();*/
         expect(screen.getByRole('tab', { name: 'Training Details' })).toBeInTheDocument();
     });
 

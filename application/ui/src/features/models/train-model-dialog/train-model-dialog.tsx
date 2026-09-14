@@ -6,12 +6,13 @@ import { $api } from '../../../api/client';
 import { SchemaTrainJob as SchemaJob, SchemaModel } from '../../../api/openapi-spec';
 import { useProject } from '../../projects/use-project';
 import { useRemoteTrainerHealth } from '../../remote-trainers/use-remote-trainer-health';
+import { supportsSnapflow } from '../shared/snapflow';
 import { ExportStep } from './export-step';
 import { FeatureMappingStep } from './feature-mapping-step';
 import { formatBytes, MODELS } from './policies';
 import { SetupStep } from './setup-step';
 import { TrainingDeviceInfo } from './training-device-info';
-import { TrainingParameters } from './training-parameters';
+import { MIN_EPOCHS_FOR_SNAPFLOW, TrainingParameters } from './training-parameters';
 import { TrainingSummaryNote } from './training-summary-note';
 import { useExportBackends } from './use-export-backends';
 import { useFeatureMapping } from './use-feature-mapping';
@@ -32,6 +33,9 @@ type TrainingTargetOption = {
     id: string;
     label: string;
 };
+
+/** Mirrors `_DEFAULT_SNAPFLOW_DISTILL_EPOCHS` in the backend payload schema. */
+const DEFAULT_SNAPFLOW_DISTILL_EPOCHS = 3;
 
 export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: TrainModelDialogProps) => {
     const bestDevice = useBestTrainingDevice();
@@ -64,7 +68,14 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const [autoScaleBatchSize, setAutoScaleBatchSize] = useState<boolean>(bestDevice?.type === 'cuda');
     const [precision, setPrecision] = useState<Key | null>(bestDevice?.type === 'cuda' ? 'bf16-mixed' : '32-true');
     const [compileModel, setCompileModel] = useState<boolean>(false);
+    const [snapflowEnabled, setSnapflowEnabled] = useState<boolean>(false);
+    const [snapflowDistillEpochs, setSnapflowDistillEpochs] = useState<number>(DEFAULT_SNAPFLOW_DISTILL_EPOCHS);
     const [remoteTrainerId, setRemoteTrainerId] = useState<Key | null>('local');
+    const isSnapflowSupported = supportsSnapflow(selectedPolicy);
+    // snapflow_distill_epochs is additive on top of max_epochs (the teacher phase
+    // always runs the full max_epochs before distillation extends the run), so it
+    // needs no clamp against max_epochs.
+    const isSnapflowRequested = isSnapflowSupported && snapflowEnabled && maxEpochs >= MIN_EPOCHS_FOR_SNAPFLOW;
     const isRemoteTarget = remoteTrainerId !== null && remoteTrainerId !== 'local';
     const {
         health: remoteTrainerHealth,
@@ -196,6 +207,8 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             image_key_reorder_map: featureMapping.imageKeyReorderMap,
             num_cameras: featureMapping.numCameras,
             export_backends: exportSelection.selectedBackends,
+            snapflow_enabled: isSnapflowRequested,
+            snapflow_distill_epochs: snapflowDistillEpochs,
             val_split: 0.1,
             ...extraPayload,
         } as const;
@@ -276,6 +289,11 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 onCompileModelChange={setCompileModel}
                                 isAutoScaleBatchDisabled={activeDevice?.type !== 'cuda'}
                                 deviceType={activeDevice?.type}
+                                isSnapflowSupported={isSnapflowSupported}
+                                snapflowEnabled={snapflowEnabled}
+                                onSnapflowEnabledChange={setSnapflowEnabled}
+                                snapflowDistillEpochs={snapflowDistillEpochs}
+                                onSnapflowDistillEpochsChange={setSnapflowDistillEpochs}
                             />
                         )}
 

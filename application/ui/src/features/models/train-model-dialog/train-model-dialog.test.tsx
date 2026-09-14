@@ -65,6 +65,16 @@ const mockProjectWithRemoteTrainer = () => {
                     stream_reconnect_backoff_max_s: 30,
                 },
                 huggingface: { hf_token: null },
+                ssh: {
+                    connect_timeout_s: 10,
+                    command_timeout_s: 15,
+                    preflight_timeout_s: 30,
+                    image_pull_timeout_s: 1800,
+                    readiness_timeout_s: 120,
+                    gpu_wait_giveup_s: 1800,
+                    min_free_disk_bytes: 53687091200,
+                },
+                hotkeys: { bindings: {} },
             })
         ),
         http.get('/api/policies/backends', () =>
@@ -123,6 +133,16 @@ const goToLastStep = async (user: ReturnType<typeof userEvent.setup>) => {
     while (screen.queryByRole('button', { name: 'Next' }) !== null) {
         await user.click(screen.getByRole('button', { name: 'Next' }));
     }
+};
+
+// SnapFlow is offered on the training parameters step, which SmolVLA reaches
+// through its feature-mapping step. Waiting for each step to render keeps Next
+// from being pressed before the mapping has loaded and enabled it.
+const goToSmolVlaTrainingParameters = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByLabelText(/Gripper/i, { selector: 'button' });
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByRole('slider', { name: /batch size/i });
 };
 
 describe('TrainModelDialog', () => {
@@ -212,6 +232,81 @@ describe('TrainModelDialog', () => {
             await screen.findByText(/This policy downloads pretrained assets from Hugging Face/i)
         ).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    });
+
+    it('offers SnapFlow distillation only for flow-matching policies', async () => {
+        // ACT has no flow-matching sampler to distil, so the backend would
+        // reject the request; don't offer what can't be submitted.
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+
+        // ACT skips feature mapping, so one Next lands on the training parameters.
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+        expect(await screen.findByRole('slider', { name: /batch size/i })).toBeInTheDocument();
+        expect(screen.queryByRole('checkbox', { name: /snapflow distillation/i })).not.toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: 'Back' }));
+        await user.click(await screen.findByLabelText('Select SmolVLA policy'));
+        await goToSmolVlaTrainingParameters(user);
+
+        expect(await screen.findByRole('checkbox', { name: /snapflow distillation/i })).toBeInTheDocument();
+    });
+
+    it('submits the distillation budget when SnapFlow is enabled', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+
+        let submitted: Record<string, unknown> | undefined;
+        server.use(
+            http.post('/api/jobs:train', async ({ request }) => {
+                submitted = (await request.json()) as Record<string, unknown>;
+                return HttpResponse.json({}, { status: 201 });
+            })
+        );
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await user.click(screen.getByLabelText('Select SmolVLA policy'));
+        await goToSmolVlaTrainingParameters(user);
+        await user.click(await screen.findByRole('checkbox', { name: /snapflow distillation/i }));
+        await goToLastStep(user);
+        await user.click(screen.getByRole('button', { name: 'Train' }));
+
+        await waitFor(() => expect(submitted).toBeDefined());
+        expect(submitted).toMatchObject({
+            policy: 'smolvla',
+            snapflow_enabled: true,
+            snapflow_distill_epochs: 3,
+        });
+    });
+
+    it('does not ask for distillation when the box is left unchecked', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+
+        let submitted: Record<string, unknown> | undefined;
+        server.use(
+            http.post('/api/jobs:train', async ({ request }) => {
+                submitted = (await request.json()) as Record<string, unknown>;
+                return HttpResponse.json({}, { status: 201 });
+            })
+        );
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await user.click(screen.getByLabelText('Select SmolVLA policy'));
+        await goToSmolVlaTrainingParameters(user);
+        await goToLastStep(user);
+        await user.click(screen.getByRole('button', { name: 'Train' }));
+
+        await waitFor(() => expect(submitted).toBeDefined());
+        expect(submitted).toMatchObject({ snapflow_enabled: false });
     });
 
     it('blocks Pi0.5 training when the token lacks gated-model access', async () => {
