@@ -65,7 +65,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const [maxEpochs, setMaxEpochs] = useState<number>(defaultMaxEpochs);
     const [batchSize, setBatchSize] = useState<number>(8);
     const [numWorkers, setNumWorkers] = useState<Key | null>('auto');
-    const [autoScaleBatchSize, setAutoScaleBatchSize] = useState<boolean>(bestDevice?.type === 'cuda');
+    const [autoScaleBatchSize, setAutoScaleBatchSize] = useState<boolean>(false);
     const [precision, setPrecision] = useState<Key | null>(bestDevice?.type === 'cuda' ? 'bf16-mixed' : '32-true');
     const [compileModel, setCompileModel] = useState<boolean>(false);
     const [snapflowEnabled, setSnapflowEnabled] = useState<boolean>(false);
@@ -107,10 +107,8 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     useEffect(() => {
         if (activeDevice?.type === 'cuda') {
             setPrecision('bf16-mixed');
-            setAutoScaleBatchSize(true);
         } else {
             setPrecision('32-true');
-            setAutoScaleBatchSize(false);
         }
     }, [activeDevice]);
 
