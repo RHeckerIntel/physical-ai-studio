@@ -534,4 +534,83 @@ describe('TrainModelDialog', () => {
         await user.click(screen.getByRole('button', { name: 'Back' }));
         expect(await screen.findByRole('slider', { name: /batch size/i })).toBeInTheDocument();
     });
+
+    describe('image augmentation', () => {
+        const submitAndCapturePayload = async (toggle: boolean) => {
+            const user = userEvent.setup();
+            let body: Record<string, unknown> | undefined;
+
+            mockProjectWithRemoteTrainer();
+            server.use(
+                http.post('/api/jobs:train', async ({ request }) => {
+                    body = (await request.json()) as Record<string, unknown>;
+                    return HttpResponse.json({}, { status: 201 });
+                })
+            );
+
+            renderDialog();
+
+            await user.click(await screen.findByRole('button', { name: /select…/i }));
+            await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+            if (toggle) {
+                // The checkbox lives on the training parameters step, one Next away for ACT.
+                await user.click(screen.getByRole('button', { name: 'Next' }));
+                await user.click(await screen.findByRole('checkbox', { name: /augment images/i }));
+            }
+            await goToLastStep(user);
+            await user.click(screen.getByRole('button', { name: 'Train' }));
+
+            await waitFor(() => expect(body).toBeDefined());
+            return body;
+        };
+
+        it('is off unless the user opts in', async () => {
+            expect(await submitAndCapturePayload(false)).toMatchObject({ augment_images: false });
+        });
+
+        it('is submitted when the checkbox is ticked', async () => {
+            expect(await submitAndCapturePayload(true)).toMatchObject({ augment_images: true });
+        });
+    });
+
+    it('hides LoRA fine-tuning controls for a policy without PEFT support', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+
+        // ACT has no PEFT support, so its training parameters step offers no LoRA.
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+        expect(await screen.findByRole('slider', { name: /batch size/i })).toBeInTheDocument();
+
+        expect(screen.queryByText('LoRA fine-tuning')).not.toBeInTheDocument();
+    });
+
+    it('shows LoRA fine-tuning controls for Pi0.5', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+        // Pi0.5 is gated behind a Hugging Face token by default, which blocks Next;
+        // this test is about the LoRA controls, not the gate.
+        server.use(
+            http.get('/api/policies/{policy}/huggingface-access', () => HttpResponse.json({ requirements: [] }))
+        );
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await user.click(screen.getByLabelText('Select Pi0.5 policy'));
+
+        // Pi0.5 reads no fixed camera order, so one Next lands on the training parameters.
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+
+        expect(await screen.findByText('LoRA fine-tuning')).toBeInTheDocument();
+
+        // Rank/alpha/dropout/DoRA are hidden until LoRA itself is enabled.
+        expect(screen.queryByText('LoRA rank')).not.toBeInTheDocument();
+        await user.click(screen.getByRole('checkbox', { name: 'LoRA fine-tuning' }));
+        expect(await screen.findByText('LoRA rank')).toBeInTheDocument();
+    });
 });
