@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import { $api } from '../../../api/client';
-import type { SchemaExportBackend } from '../../../api/openapi-spec';
+import type { SchemaExportBackendOutput } from '../../../api/openapi-spec';
 import { INFERENCE_BACKENDS, InferenceBackendConfig, isExportBackend } from '../inference-backends';
 
 export interface ExportSelection {
     /** Export formats this policy can produce, in the order the backend reports them. */
     backends: InferenceBackendConfig[];
     /** Formats to export after training, as the train payload takes them. */
-    selectedBackends: SchemaExportBackend[];
-    setSelectedBackends: (backends: SchemaExportBackend[]) => void;
+    selectedBackends: SchemaExportBackendOutput[];
+    setSelectedBackends: (backends: SchemaExportBackendOutput[]) => void;
     isLoading: boolean;
     /** Why the selection can't be trained with, or null when it is fine. */
     error: string | null;
@@ -30,7 +30,7 @@ export const useExportBackends = (policy: string): ExportSelection => {
         [backendsByPolicy, policy]
     );
 
-    const [selectedBackends, setSelectedBackends] = useState<SchemaExportBackend[]>([]);
+    const [selectedBackends, setSelectedBackends] = useState<SchemaExportBackendOutput[]>([]);
 
     // Every supported format is exported by default, which is what training did
     // before the formats could be chosen at all. A policy switch changes the
