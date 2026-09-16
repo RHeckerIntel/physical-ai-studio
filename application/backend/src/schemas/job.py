@@ -3,13 +3,26 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from loguru import logger
-from physicalai.export.backends import ExportBackend
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_serializer, field_validator, model_validator
 
 from schemas.base_job import BaseJob, JobType
 from schemas.dataset_import_job import DatasetImportJobPayload
 from schemas.hardware import DeviceType
 from training.job import PEFT_POLICIES, SNAPFLOW_POLICIES
+
+
+class ExportBackend(StrEnum):
+    """Export formats a policy can produce.
+
+    Mirrors ``physicalai.export.backends.ExportBackend``; kept local so the
+    schemas package stays free of a runtime ``physicalai`` import (see
+    test_export_backend_matches_library for the parity check).
+    """
+
+    ONNX = "onnx"
+    OPENVINO = "openvino"
+    TORCH = "torch"
+    EXECUTORCH = "executorch"
 
 
 class TrainingPrecision(StrEnum):

@@ -114,6 +114,7 @@ class TestCameraMapping:
 
         assert payload.image_key_reorder_map == {"gripper": 1, "overhead": 0}
 
+
 class TestLoraFields:
     def test_lora_disabled_by_default(self) -> None:
         payload = LocalTrainJobPayload(**_base_kwargs())
