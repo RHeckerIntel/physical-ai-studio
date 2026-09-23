@@ -29,6 +29,8 @@ const AvailableRobotCell = ({
     );
     useSynchronizeModelJoints(joints, robot.type);
 
+    const canTeleoperate = state.has_leader;
+
     const isTeleoperating = state.follower_source === 'teleop';
 
     if (error) {
@@ -85,7 +87,7 @@ const AvailableRobotCell = ({
                     <Button variant='secondary' onPress={restart}>
                         Restart session
                     </Button>
-                    {leaderId !== undefined && (
+                    {canTeleoperate && leaderId !== undefined && (
                         <Switch
                             isEmphasized
                             isSelected={isTeleoperating}

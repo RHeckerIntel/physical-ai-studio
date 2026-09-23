@@ -60,7 +60,7 @@ class StreamCallback:
                 state = (
                     self._state_data()
                     if self._state_data is not None
-                    else StateData(connected=True, follower_source=self._follower_source())
+                    else StateData(connected=True, follower_source=self._follower_source(), has_leader=False)
                 )
                 self._event_sink.emit(StateEvent(data=state))
         elif event.event == "shutdown":

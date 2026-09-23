@@ -14,9 +14,10 @@ import { FollowerSource, runtimeSocketUrl } from './use-joint-state';
 
 type InferenceDevice = Pick<SchemaInferenceDeviceInfo, 'backend' | 'device'>;
 
-interface RuntimeSessionState {
+export interface RuntimeSessionState {
     connected: boolean;
     follower_source: FollowerSource;
+    has_leader: boolean;
     model_loaded: boolean;
     task: string | null;
     dataset_loaded: boolean;
