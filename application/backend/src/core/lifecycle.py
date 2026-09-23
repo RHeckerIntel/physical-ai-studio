@@ -15,6 +15,7 @@ from services.camera_claims import CameraClaimRegistry
 from services.event_processor import EventProcessor
 from services.health_service import HealthService
 from services.remote_trainer_service import RemoteTrainerService
+from services.runtime_session_service import RuntimeSessionService
 from settings import get_settings
 from utils.multiprocessing import ensure_spawn_start_method
 from utils.serial_robot_tools import RobotConnectionManager
@@ -98,6 +99,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     app.state.scheduler = app_scheduler
     app.state.event_processor = EventProcessor(app_scheduler.event_queue)
+    app.state.runtime_session_count_watch_task = asyncio.create_task(
+        RuntimeSessionService().watch_count(app_scheduler.event_queue)
+    )
     logger.info("Application startup completed")
 
     # Initialize RobotHardwareManager
@@ -114,6 +118,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Shutdown
     logger.info(f"Shutting down {settings.app_name} application...")
     app.state.remote_trainer_tunnel_startup_task.cancel()
+    app.state.runtime_session_count_watch_task.cancel()
     await remote_trainer_tunnel_manager.stop_all()
 
     # We might want to shutdown the hardware manager too, though releasing workers should handle it.

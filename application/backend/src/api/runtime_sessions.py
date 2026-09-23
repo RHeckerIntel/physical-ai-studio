@@ -8,16 +8,19 @@ identity carries no project, and a session whose robot row has been deleted has
 no project to be listed under.
 """
 
+import asyncio
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, status
+from fastapi import APIRouter, Depends, Path, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import Response
 from loguru import logger
 
-from api.dependencies import get_runtime_session_service
+from api.dependencies import get_event_processor_ws, get_runtime_session_service
 from exceptions import BaseException as AppBaseException
 from runtime.transport.ids import validate_session_name
 from schemas.runtime_session import RuntimeSessionCount, RuntimeSessionInfo
+from services.event_processor import EventProcessor, EventType
 from services.runtime_session_service import RuntimeSessionService
 
 router = APIRouter(prefix="/api/runtime", tags=["Runtime Sessions"])
@@ -36,10 +39,47 @@ async def list_runtime_sessions(service: RuntimeSessionServiceDep) -> list[Runti
 async def count_runtime_sessions(service: RuntimeSessionServiceDep) -> RuntimeSessionCount:
     """Count the runtime sessions holding a lock on this host.
 
-    Answered from the lock directory alone. The always-mounted footer polls this,
-    so the common case of nothing running must not open a transport session.
+    Answered from the lock directory alone. Kept for the initial fetch; the
+    always-mounted footer gets live updates from `/sessions/ws` instead of
+    polling this.
     """
     return RuntimeSessionCount(count=service.count())
+
+
+@router.get("/sessions/ws", tags=["WebSocket"], summary="Runtime session count updates (WebSocket)", status_code=426)
+async def runtime_session_count_websocket_openapi() -> Response:
+    """This endpoint requires a WebSocket connection. Use `wss://` to connect."""
+    return Response(status_code=426)
+
+
+@router.websocket("/sessions/ws")
+async def runtime_session_count_websocket(
+    websocket: WebSocket,
+    service: RuntimeSessionServiceDep,
+    event_processor: Annotated[EventProcessor, Depends(get_event_processor_ws)],
+) -> None:
+    """Push the runtime session count as it changes.
+
+    A single host-side watcher task (`RuntimeSessionService.watch_count`)
+    polls the lock directory and emits on this event; every connected client
+    just receives the resulting pushes instead of polling itself.
+    """
+    await websocket.accept()
+
+    async def send_count(event: EventType, payload: RuntimeSessionCount) -> None:
+        await websocket.send_json({"event": event, "data": payload.model_dump(mode="json")})
+
+    event_processor.subscribe([EventType.RUNTIME_SESSION_COUNT_UPDATE], send_count)
+    await send_count(
+        EventType.RUNTIME_SESSION_COUNT_UPDATE, RuntimeSessionCount(count=await asyncio.to_thread(service.count))
+    )
+
+    try:
+        while True:
+            await websocket.receive_json("text")
+    except WebSocketDisconnect:
+        pass
+    event_processor.unsubscribe([EventType.RUNTIME_SESSION_COUNT_UPDATE], send_count)
 
 
 @router.post("/sessions/{session_name}/stop", status_code=status.HTTP_204_NO_CONTENT)

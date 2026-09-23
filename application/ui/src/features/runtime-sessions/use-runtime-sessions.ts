@@ -1,20 +1,61 @@
-import { $api } from '../../api/client';
-import { SchemaRuntimeSessionInfo } from '../../api/openapi-spec';
+import { useQueryClient } from '@tanstack/react-query';
+import useWebSocket from 'react-use-websocket';
+
+import { $api, fetchClient } from '../../api/client';
+import { SchemaRuntimeSessionCount, SchemaRuntimeSessionInfo } from '../../api/openapi-spec';
 
 /**
- * Runtime sessions are detached processes the backend cannot push events about,
- * so both of these poll. The two intervals differ on purpose: the count is a
- * directory read and is mounted on every page, the list opens a transport
- * session per runtime session and is only mounted while someone is looking.
+ * Sessions can start or stop without any API call (idle timeout, a worker
+ * crash), so the list still has to poll: nothing would otherwise tell it a
+ * row went away. It's only mounted while someone has the popover open, and it
+ * opens a transport session per runtime session, hence the slower list poll.
+ *
+ * The count doesn't poll: a single host-side watcher already does that (see
+ * `RuntimeSessionService.watch_count`) and pushes changes over
+ * `useRuntimeSessionCountUpdates` below, so every client polling it itself
+ * would just be redundant.
  */
-const COUNT_POLL_MS = 5_000;
 const LIST_POLL_MS = 2_000;
 
-export const useRuntimeSessionCount = () =>
-    $api.useQuery('get', '/api/runtime/sessions/count', {}, { refetchInterval: COUNT_POLL_MS });
+const RUNTIME_SESSION_COUNT_QUERY_KEY = ['get', '/api/runtime/sessions/count', {}] as const;
+
+export const useRuntimeSessionCount = () => $api.useQuery('get', '/api/runtime/sessions/count', {});
 
 export const useRuntimeSessions = () =>
     $api.useQuery('get', '/api/runtime/sessions', {}, { refetchInterval: LIST_POLL_MS });
+
+/**
+ * Owns the runtime session count websocket subscription, keeping the shared
+ * `/api/runtime/sessions/count` query cache in sync as the host-side watcher
+ * pushes changes. Mounted once from `RuntimeSessionStatus`, the always-present
+ * footer chip, so it never depends on the popover being open.
+ *
+ * Refetches on every (re)connect to recover any change missed while
+ * disconnected — the socket is a fast path on top of that, not the only path.
+ */
+export const useRuntimeSessionCountUpdates = () => {
+    const client = useQueryClient();
+
+    const onMessage = ({ data }: WebSocketEventMap['message']) => {
+        const message = JSON.parse(data);
+
+        if (message.event !== 'RUNTIME_SESSION_COUNT_UPDATE') {
+            return;
+        }
+
+        client.setQueryData(RUNTIME_SESSION_COUNT_QUERY_KEY, message.data as SchemaRuntimeSessionCount);
+    };
+
+    const onOpen = () => {
+        client.invalidateQueries({ queryKey: RUNTIME_SESSION_COUNT_QUERY_KEY });
+    };
+
+    useWebSocket(fetchClient.PATH('/api/runtime/sessions/ws'), {
+        shouldReconnect: () => true,
+        onMessage,
+        onOpen,
+    });
+};
 
 export const useStopRuntimeSession = () =>
     $api.useMutation('post', '/api/runtime/sessions/{session_name}/stop', {

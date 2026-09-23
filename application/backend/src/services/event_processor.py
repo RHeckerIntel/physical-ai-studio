@@ -11,6 +11,7 @@ from loguru import logger
 class EventType(StrEnum):
     MODEL_UPDATE = "MODEL_UPDATE"
     JOB_UPDATE = "JOB_UPDATE"
+    RUNTIME_SESSION_COUNT_UPDATE = "RUNTIME_SESSION_COUNT_UPDATE"
 
 
 class EventProcessor:

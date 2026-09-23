@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -24,10 +24,15 @@ from runtime.owner import probe_session_metadata, stop_runtime_session
 from runtime.transport.lock import live_session_pid, registered_session_names
 from schemas.runtime_session import (
     RuntimeSessionActivity,
+    RuntimeSessionCount,
     RuntimeSessionError,
     RuntimeSessionInfo,
     RuntimeSessionStatus,
 )
+from services.event_processor import EventType
+
+if TYPE_CHECKING:
+    import multiprocessing as mp
 
 
 def _follower_id(session_name: str) -> UUID | None:
@@ -86,6 +91,23 @@ class RuntimeSessionService:
     def count(self) -> int:
         """Count sessions holding a live lock. Blocking, but only a directory read."""
         return len(registered_session_names())
+
+    async def watch_count(self, event_queue: mp.Queue, interval_s: float = 2.0) -> None:
+        """Push a count update onto the event queue whenever the count changes.
+
+        Sessions can start or stop without any API call (idle timeout, a worker
+        crash), so nothing in this process is notified of a change directly.
+        Polling the lock directory once here, in a single background task, and
+        only emitting on an actual change replaces every client's own polling
+        loop with one host-side check shared by all of them.
+        """
+        last_count: int | None = None
+        while True:
+            count = await asyncio.to_thread(self.count)
+            if count != last_count:
+                last_count = count
+                event_queue.put((EventType.RUNTIME_SESSION_COUNT_UPDATE, RuntimeSessionCount(count=count)))
+            await asyncio.sleep(interval_s)
 
     def describe(self, session_name: str) -> RuntimeSessionInfo:
         """Probe one session and map its metadata onto the read model. Blocking.

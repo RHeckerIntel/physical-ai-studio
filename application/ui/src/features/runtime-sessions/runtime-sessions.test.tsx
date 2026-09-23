@@ -10,6 +10,13 @@ import { render } from '../../test-utils/render';
 import { RuntimeSessionsDialog, RuntimeSessionStatus } from './runtime-sessions';
 import { sessionStatusVariant } from './use-runtime-sessions';
 
+// RuntimeSessionStatus opens a real websocket via useRuntimeSessionCountUpdates;
+// stub it so these tests exercise the REST fallback only, same as
+// use-job-updates.test.tsx does for the jobs websocket.
+vi.mock('react-use-websocket', () => ({
+    default: () => ({ readyState: 1 }),
+}));
+
 const SESSIONS_PATH = '/api/runtime/sessions';
 const COUNT_PATH = '/api/runtime/sessions/count';
 const STOP_PATH = '/api/runtime/sessions/{session_name}/stop';

@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
+from api.dependencies import get_event_processor_ws
 from main import app
 from runtime.transport.ids import runtime_session_name
 from runtime.transport.lock import SessionNameLock
+from schemas.runtime_session import RuntimeSessionCount
+from services.event_processor import EventType
+from services.runtime_session_service import RuntimeSessionService
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.fixture(autouse=True)
@@ -300,6 +308,72 @@ def test_a_session_that_survives_the_stop_is_reported(client: TestClient, monkey
 
     assert response.status_code == 500
     assert response.json()["error_code"] == "runtime_session_stop_failed"
+
+
+class _FakeEventProcessor:
+    """Records subscriptions instead of dispatching a real queue."""
+
+    def __init__(self) -> None:
+        self.subscribed: list[Callable] = []
+
+    def subscribe(self, event_types: Any, handler: Callable) -> None:
+        self.subscribed.append(handler)
+
+    def unsubscribe(self, event_types: Any, handler: Callable) -> None:
+        self.subscribed.remove(handler)
+
+
+def test_the_count_websocket_sends_the_current_count_on_connect(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _name()
+    fake_processor = _FakeEventProcessor()
+    app.dependency_overrides[get_event_processor_ws] = lambda: fake_processor
+
+    try:
+        with SessionNameLock(name), client.websocket_connect("/api/runtime/sessions/ws") as websocket:
+            assert websocket.receive_json() == {"event": "RUNTIME_SESSION_COUNT_UPDATE", "data": {"count": 1}}
+            assert len(fake_processor.subscribed) == 1
+
+        assert fake_processor.subscribed == []
+    finally:
+        app.dependency_overrides.clear()
+
+
+class _FakeQueue:
+    """Stands in for the multiprocessing queue `watch_count` pushes onto."""
+
+    def __init__(self) -> None:
+        self.items: list[tuple[EventType, RuntimeSessionCount]] = []
+
+    def put(self, item: tuple[EventType, RuntimeSessionCount]) -> None:
+        self.items.append(item)
+
+
+async def test_watch_count_emits_only_when_the_count_changes() -> None:
+    """A crash or idle timeout never calls the API, so this is the only thing that notices."""
+    service = RuntimeSessionService()
+    values = [0, 0, 1, 1, 2]
+    calls = 0
+
+    def fake_count() -> int:
+        nonlocal calls
+        value = values[min(calls, len(values) - 1)]
+        calls += 1
+        return value
+
+    service.count = fake_count  # type: ignore[method-assign]
+
+    queue = _FakeQueue()
+    task = asyncio.create_task(service.watch_count(queue, interval_s=0))  # type: ignore[arg-type]
+    try:
+        await asyncio.sleep(0.05)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert [payload.count for _, payload in queue.items] == [0, 1, 2]
 
 
 def test_a_stale_lock_file_does_not_break_the_list(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

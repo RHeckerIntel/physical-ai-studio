@@ -30,6 +30,7 @@ import {
     sessionStatusVariant,
     uptimeLabel,
     useRuntimeSessionCount,
+    useRuntimeSessionCountUpdates,
     useRuntimeSessions,
     useStopRuntimeSession,
 } from './use-runtime-sessions';
@@ -353,11 +354,13 @@ export const RuntimeSessionsDialog = ({
 /**
  * Footer entry point for the runtime sessions running on this host.
  *
- * Renders nothing when none are, matching the job status beside it. Polls the
- * count rather than the list: this is mounted on every page, and the count is a
- * directory read while the list opens a transport session per runtime session.
+ * Renders nothing when none are, matching the job status beside it. Gets the
+ * count from `useRuntimeSessionCountUpdates`'s websocket rather than polling:
+ * this is mounted on every page, so a per-page poll would multiply into one
+ * request per open tab for what a single host-side watcher already tracks.
  */
 export const RuntimeSessionStatus = () => {
+    useRuntimeSessionCountUpdates();
     const { data } = useRuntimeSessionCount();
     const count = data?.count ?? 0;
     const [isOpen, setIsOpen] = useState(false);

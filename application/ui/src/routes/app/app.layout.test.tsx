@@ -17,6 +17,12 @@ vi.mock('../../features/jobs/use-job-updates', () => ({
     useJobUpdates: () => {},
 }));
 
+// AppFooter also mounts RuntimeSessionStatus, which opens a real websocket via
+// useRuntimeSessionCountUpdates; stub it out the same way as the jobs socket.
+vi.mock('react-use-websocket', () => ({
+    default: () => ({ readyState: 1 }),
+}));
+
 describe('AppLayout', () => {
     it('renders the logo, linking to the projects page', () => {
         render(<AppLayout />, { route: '/projects', path: '/projects' });
