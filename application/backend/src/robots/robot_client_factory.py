@@ -3,6 +3,8 @@ from typing import Any
 from loguru import logger
 from physicalai.robot import SharedRobot
 from physicalai_studio_plugin import CatalogRobotFactory, RobotCatalogDefinition, shared_robot_name
+from physicalai.robot.interface import Robot as PhysicalAIRobot
+from physicalai.config.base import Config
 
 from exceptions import RobotPluginUnavailableError
 from robots.catalog.registry import RobotCatalogRegistry
@@ -46,7 +48,7 @@ class RobotClientFactory:
 
     async def build_robot_driver(
         self, robot: ReadableRobot, port_finder: CatalogRobotFactory
-    ) -> tuple[Any, RobotCatalogDefinition]:
+    ) -> tuple[PhysicalAIRobot, RobotCatalogDefinition]:
         """Run the catalog builder for a robot and return its driver and definition."""
         if isinstance(robot, UnavailableRobot):
             raise RobotPluginUnavailableError(robot.name, robot.type)
@@ -67,7 +69,7 @@ class RobotClientFactory:
         # the hardware. The driver itself is discarded — only its recipe is sent,
         # and the owner rebuilds it. The name keys the owner's Zenoh topics, so
         # it must come from the id, never the free-form display name.
-        shared_robot = SharedRobot.from_config(robot_driver, name=shared_robot_name(robot.id))
+        shared_robot = SharedRobot.from_config(Config.from_instance(robot_driver), name=shared_robot_name(robot.id))
         return shared_robot, definition
 
     async def find_port(self, port_info: SerialPortInfo) -> str | None:
