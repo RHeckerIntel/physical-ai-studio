@@ -11,9 +11,8 @@ import zenoh
 
 @dataclass(frozen=True, slots=True)
 class RuntimeSessionContext:
-    zenoh_pub: zenoh.Publisher
-    zenoh_sub: zenoh.Subscriber
     stack: AsyncExitStack
+    listeners: list[zenoh.Subscriber]
 
 
 
@@ -25,14 +24,19 @@ class RuntimeSession(BaseThreadWorker[RuntimeSessionContext]):
     @asynccontextmanager
     async def lifecycle(self) -> AsyncGenerator[RuntimeSessionContext]:
         async with AsyncExitStack() as stack:
-            zenoh_pub, zenoh_sub = await stack.enter_async_context(zenoh_anchor(self.zenoh_key, self._on_message))
-            yield RuntimeSessionContext(zenoh_pub=zenoh_pub, zenoh_sub=zenoh_sub, stack=stack)
+            zenoh_session = stack.enter_context(zenoh.open(zenoh.Config()))
+            yield RuntimeSessionContext(
+                stack=stack,
+                listeners=[
+                    zenoh_session.declare_subscriber(f"{self.zenoh_key}/load_environment", self._load_environment)
+                ]
+            )
 
 
     async def run_loop(self, context: RuntimeSessionContext):
         pass
 
-    def _on_message(self, sample: zenoh.Sample):
+    def _load_environment(self, sample: zenoh.Sample):
         print("sample")
         print(sample)
 
