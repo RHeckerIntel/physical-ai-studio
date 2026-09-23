@@ -88,16 +88,16 @@ export const InferenceViewer = ({ tasks }: InferenceViewerProps) => {
                             <Item key={index}>{taskText}</Item>
                         ))}
                     </ComboBox>
-                    {canTeleoperate && (
-                        <Switch
-                            isEmphasized
-                            isSelected={isTeleoperating}
-                            isDisabled={setFollowerSource.isPending || startTask.isPending || stopTask.isPending}
-                            onChange={(enabled) => setFollowerSource.mutate(enabled ? 'teleop' : 'hold')}
-                        >
-                            Teleoperate
-                        </Switch>
-                    )}
+                    <Switch
+                        isEmphasized
+                        isSelected={isTeleoperating}
+                        isDisabled={
+                            !canTeleoperate || setFollowerSource.isPending || startTask.isPending || stopTask.isPending
+                        }
+                        onChange={(enabled) => setFollowerSource.mutate(enabled ? 'teleop' : 'hold')}
+                    >
+                        Teleoperate
+                    </Switch>
                     <ButtonGroup>
                         {exportUrl !== undefined && (
                             <Button
