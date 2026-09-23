@@ -28,6 +28,7 @@ export interface RuntimeSessionState {
 const createRuntimeSessionState = (): RuntimeSessionState => ({
     connected: false,
     follower_source: 'hold',
+    has_leader: false,
     model_loaded: false,
     task: null,
     dataset_loaded: false,
@@ -152,6 +153,7 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
                 setState({
                     connected: next.connected ?? false,
                     follower_source: next.follower_source ?? 'hold',
+                    has_leader: next.has_leader ?? false,
                     model_loaded: next.model_loaded ?? false,
                     task: next.task ?? null,
                     dataset_loaded: next.dataset_loaded ?? false,
