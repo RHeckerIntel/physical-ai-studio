@@ -16,33 +16,33 @@
 # it fails the commit if generation or the retried TypeScript check fails.
 
 repos:
-    - repo: local
-      hooks:
-          - id: ui-prettier-check
-            name: UI Prettier format check
-            entry: npm run format:check --silent
-            language: system
-            files: ^src/.*\.(js|jsx|ts|tsx|css)$
-            pass_filenames: true
+  - repo: local
+    hooks:
+      - id: ui-prettier-check
+        name: UI Prettier format check
+        entry: npm run format:check --silent
+        language: system
+        files: ^src/.*\.(js|jsx|ts|tsx|css)$
+        pass_filenames: true
 
-          - id: ui-eslint
-            name: UI ESLint
-            entry: npm run lint --silent
-            language: system
-            files: ^(src/.*\.(ts|tsx)|package(-lock)?\.json|tsconfig.*\.json|eslint(\.shared)?\.config\.js)$
-            pass_filenames: true
+      - id: ui-eslint
+        name: UI ESLint
+        entry: npm run lint --silent
+        language: system
+        files: ^(src/.*\.(ts|tsx)|package(-lock)?\.json|tsconfig.*\.json|eslint(\.shared)?\.config\.js)$
+        pass_filenames: true
 
-          - id: ui-cyclic-deps-check
-            name: UI ESLint cyclic imports
-            entry: npm run cyclic-deps-check --silent
-            language: system
-            files: ^(src/.*\.(ts|tsx)|package(-lock)?\.json|tsconfig.*\.json|eslint(\.shared)?\.config\.js)$
-            pass_filenames: false
+      - id: ui-cyclic-deps-check
+        name: UI ESLint cyclic imports
+        entry: npm run cyclic-deps-check --silent
+        language: system
+        files: ^(src/.*\.(ts|tsx)|package(-lock)?\.json|tsconfig.*\.json|eslint(\.shared)?\.config\.js)$
+        pass_filenames: false
 
-          - id: ui-type-check
-            name: UI TypeScript
-            entry: >-
-                /bin/sh -c 'npm run type-check --silent || { (cd ../backend && uv run physicalai-studio gen-api --target-path ../ui/src/api/openapi-spec.json) && npm run build:api --silent && npm run type-check --silent; }'
-            language: system
-            files: ^(src/.*\.(ts|tsx)|package(-lock)?\.json|tsconfig.*\.json|eslint(\.shared)?\.config\.js)$
-            pass_filenames: false
+      - id: ui-type-check
+        name: UI TypeScript
+        entry: >-
+          /bin/sh -c 'npm run type-check --silent || { (cd ../backend && uv run physicalai-studio gen-api --target-path ../ui/src/api/openapi-spec.json) && npm run build:api --silent && npm run type-check --silent; }'
+        language: system
+        files: ^(src/.*\.(ts|tsx)|package(-lock)?\.json|tsconfig.*\.json|eslint(\.shared)?\.config\.js)$
+        pass_filenames: false
