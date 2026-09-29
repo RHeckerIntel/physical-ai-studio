@@ -1,4 +1,6 @@
 from runtimev2.components.environment import EnvironmentWorker
+import msgpack
+
 from runtimev2.thread_base import BaseThreadWorker
 from uuid import uuid4
 from typing import AsyncGenerator
@@ -22,13 +24,13 @@ class RuntimeSession(BaseThreadWorker[RuntimeSessionContext]):
         super().__init__(stop_event=stop_event)
         self.config = config
         self.zenoh_key = zenoh.KeyExpr(f"{uuid4()}")
-        self.environment:  = None
+        self.environment : EnvironmentWorker | None = None
 
     @asynccontextmanager
     async def lifecycle(self) -> AsyncGenerator[RuntimeSessionContext]:
         async with AsyncExitStack() as stack:
             zenoh_session = stack.enter_context(zenoh.open(zenoh.Config()))
-
+            self.environment : EnvironmentWorker | None = None
             print("setting up context...")
             yield RuntimeSessionContext(
                 stack=stack,
@@ -36,13 +38,23 @@ class RuntimeSession(BaseThreadWorker[RuntimeSessionContext]):
                 #    "load_environment": zenoh_session.declare_publisher(self.zenoh_key.concat("load_environment"))
                 #},
                 listeners=[
-                    #zenoh_session.declare_subscriber(self.zenoh_key.concat("/load_environment"), self._load_environment)
+                    zenoh_session.declare_subscriber(self.zenoh_key.concat("/load_environment"), self._load_environment)
                 ]
             )
+            print("End of runtimeSessionContext")
+            if self.environment:
+                print("Stopping environment...")
+                self.environment.stop()
 
     def _load_environment(self, sample: zenoh.Sample):
         print("load environment gotten:")
-        print(sample.payload.to_string())
+        if self.environment:
+            self.environment.stop()
+
+        data = sample.payload.to_bytes()
+        payload = msgpack.unpackb(data, raw=False)
+        self.environment = EnvironmentWorker(payload, self.zenoh_key, stop_event=self._interrupt_event)
+        self.environment.start()
 
     async def run_loop(self, context: RuntimeSessionContext):
         while not self.should_stop():

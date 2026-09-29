@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
+from schemas.robot import ReadableRobot
+from runtime.config_builder import _shared_camera_config
+from schemas.environment import EnvironmentWithRelations
 import time
 import json
 from runtimev2.session import RuntimeSession
 from workers.base import StoppableMixin
 from dataclasses import dataclass
 from abc import abstractmethod
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Any, Generator
 from contextlib import asynccontextmanager, AbstractAsyncContextManager
 from schemas.environment import TeleoperatorRobotWithRobot
 from physicalai.robot.transport._owner_config import normalize_robot_config
@@ -17,9 +20,9 @@ import multiprocessing as mp
 from multiprocessing.synchronize import Event as EventClass
 from workers.base import run_at_frequency
 from physicalai.robot.interface import Robot  # noqa: PLC0415
-from typing import Generator
 from contextlib import contextmanager
 import asyncio
+from runtime.transport.codec import _pack, _unpack
 
 from db.engine import async_session
 from services.environment_service import EnvironmentService, RobotCatalogRegistry
@@ -171,6 +174,21 @@ async def main():
         print("done")
     await session.close()
 
+async def _robot_config(robot: ReadableRobot, robot_factory: RobotClientFactory):
+    driver, _ = await robot_factory.build_robot_driver(robot, robot_factory)
+    return Config.from_instance(driver).to_dict()
+
+async def build_environment_config(environment: EnvironmentWithRelations, robot_factory: RobotClientFactory) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    config["cameras"] = [_shared_camera_config(camera) for camera in environment.cameras]
+    robot = environment.robots[0] # assume one, go to composite robot soon
+    config["robot"] = await _robot_config(robot.robot, robot_factory)
+    if isinstance(robot.tele_operator, TeleoperatorRobotWithRobot):
+        config["leader"] = await _robot_config(robot.tele_operator.robot, robot_factory)
+
+
+    return config
+
 async def session_test() -> None:
     db_session = async_session()
     try:
@@ -181,14 +199,10 @@ async def session_test() -> None:
         env = await environment_service.get_environment_by_id(project_id, environment_id)
         robot_factory= RobotClientFactory(robot_manager = RobotConnectionManager(), catalog_registry=catalog_registry)
 
-
-        robot = env.robots[0]
-        follower_driver, _ = await robot_factory.build_robot_driver(robot.robot, robot_factory)
-        follower_config = Config.from_instance(follower_driver)
-
         async with RuntimeSession.in_context_manager({}, stop_event=mp.Event()) as session:
             with session.external_interface() as external_interface:
-                external_interface["load_environment"].put(json.dumps(follower_config.to_dict()))
+                document = await build_environment_config(env, robot_factory)
+                external_interface["load_environment"].put(_pack(document))
                 t0 = time.perf_counter()
                 while session.is_alive():
                     elapsed = time.perf_counter() - t0
