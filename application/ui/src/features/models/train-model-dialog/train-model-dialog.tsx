@@ -55,7 +55,7 @@ const DEFAULT_SNAPFLOW_DISTILL_EPOCHS = 3;
 /** Strip the `trainer:` prefix off a training-target option id. */
 const targetRawId = (id: string): string => id.split(':', 2)[1] ?? id;
 
-export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: TrainModelDialogProps) => {
+export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 20 }: TrainModelDialogProps) => {
     const bestDevice = useBestTrainingDevice();
     const { data: remoteTrainers = [] } = $api.useQuery('get', '/api/remote-trainers');
     // Continuing an existing model needs its checkpoint, which only this machine
