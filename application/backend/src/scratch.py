@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+import time
+import json
+from runtimev2.session import RuntimeSession
 from workers.base import StoppableMixin
 from dataclasses import dataclass
 from abc import abstractmethod
@@ -138,12 +141,6 @@ def run_managed_process(worker: BaseProcessWorker) -> Generator[None]:
         worker.stop()
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeSession:
-    name: str
-    interrupt_event: EventClass
-
-
 async def main():
     session  =async_session()
     project_id = UUID("59498fc1-cdba-4c7e-856b-d5653d3b6640")
@@ -174,4 +171,37 @@ async def main():
         print("done")
     await session.close()
 
-asyncio.run(main())
+async def session_test() -> None:
+    db_session = async_session()
+    try:
+        project_id = UUID("59498fc1-cdba-4c7e-856b-d5653d3b6640")
+        environment_id = UUID("1d20ee3a-4e58-4917-8333-6a8c3b79565a")
+        catalog_registry = RobotCatalogRegistry()
+        environment_service = EnvironmentService(session=db_session, catalog_registry=catalog_registry)
+        env = await environment_service.get_environment_by_id(project_id, environment_id)
+        robot_factory= RobotClientFactory(robot_manager = RobotConnectionManager(), catalog_registry=catalog_registry)
+
+
+        robot = env.robots[0]
+        follower_driver, _ = await robot_factory.build_robot_driver(robot.robot, robot_factory)
+        follower_config = Config.from_instance(follower_driver)
+
+        async with RuntimeSession.in_context_manager({}, stop_event=mp.Event()) as session:
+            with session.external_interface() as external_interface:
+                external_interface["load_environment"].put(json.dumps(follower_config.to_dict()))
+                t0 = time.perf_counter()
+                while session.is_alive():
+                    elapsed = time.perf_counter() - t0
+                    if elapsed > 1:
+                        break
+                    #external_interface["load_environment"].put(json.dumps(follower_config.to_dict()))
+                    await asyncio.sleep(0.01)
+    finally:
+        await db_session.close()
+
+
+
+
+
+#asyncio.run(main())
+asyncio.run(session_test())
