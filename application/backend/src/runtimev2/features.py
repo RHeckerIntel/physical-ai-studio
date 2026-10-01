@@ -1,15 +1,17 @@
 """The shape of a session's data, and what that shape is compatible with.
 
 An environment decides which robots and cameras a session runs, and therefore
-which features exist. That set is the session's contract: a dataset can only be
-appended to if its features match, and a model can only be loaded if the
-observations it was trained on are present and the actions it emits are
-writable. Everything downstream -- the store's keys, a recorded row's columns,
-a model's input -- is derived from here rather than rediscovered.
+which features exist. That set is what the store is keyed by and what every
+worker addresses.
+
+Each joint is its own feature, which is what lets two sources author disjoint
+parts of one robot's action. Datasets and models use a packed layout instead,
+so compatibility is judged there rather than here -- see ``dataset_layout``.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -52,6 +54,15 @@ class Feature:
 def joint_feature_key(kind: FeatureKind, robot: str, joint: str) -> str:
     """Return the key for one robot joint's position."""
     return f"{kind}.{robot}.{joint}.pos"
+
+
+def sanitize_name(name: str) -> str:
+    """Return a stable, filesystem- and key-safe name for a device.
+
+    A display name is free-form; a feature key has to survive being a dict key,
+    a zenoh key expression and a dataset column.
+    """
+    return re.sub(r"[^a-z0-9_-]+", "_", name.strip().lower())
 
 
 def image_feature_key(camera: str) -> str:
@@ -121,32 +132,3 @@ class FeatureSpec:
 
     def of(self, kind: FeatureKind) -> tuple[Feature, ...]:
         return tuple(feature for feature in self.features if feature.kind == kind)
-
-    def missing_from(self, required: FeatureSpec) -> list[str]:
-        """Describe every way ``required`` is not satisfied by this spec.
-
-        Reasons rather than a bool: "this model does not fit this environment"
-        is not actionable, and the person reading it needs to know whether to
-        reselect a camera, pick another model, or recalibrate a robot.
-        """
-        reasons: list[str] = []
-        for feature in required.features:
-            if feature.key not in self:
-                reasons.append(f"{feature.key} is missing")
-                continue
-            mine = self[feature.key]
-            if mine.kind != feature.kind:
-                reasons.append(f"{feature.key} is an {mine.kind}, expected an {feature.kind}")
-            if mine.shape != feature.shape:
-                reasons.append(f"{feature.key} has shape {mine.shape}, expected {feature.shape}")
-            if mine.dtype != feature.dtype:
-                reasons.append(f"{feature.key} has dtype {mine.dtype}, expected {feature.dtype}")
-        return reasons
-
-    def satisfies(self, required: FeatureSpec) -> bool:
-        """Whether everything ``required`` needs is present here, with the same shapes.
-
-        Extra features are fine: an environment with a second camera can still
-        run a model trained without it.
-        """
-        return not self.missing_from(required)

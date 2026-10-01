@@ -5,12 +5,12 @@ from __future__ import annotations
 import pytest
 
 from runtimev2.features import (
-    Feature,
     FeatureSpec,
     camera_features,
     image_feature_key,
     joint_feature_key,
     robot_features,
+    sanitize_name,
 )
 
 JOINTS = ["shoulder_pan", "elbow_flex", "gripper"]
@@ -59,46 +59,16 @@ class TestShape:
             FeatureSpec.build(robot_features("follower", JOINTS), robot_features("follower", JOINTS))
 
 
-class TestCompatibility:
-    def test_an_identical_spec_is_satisfied(self) -> None:
-        assert _spec().satisfies(_spec())
-
-    def test_extra_features_are_allowed(self) -> None:
-        """An environment with a second camera can still run a model trained without it."""
-        required = FeatureSpec.build(robot_features("follower", JOINTS))
-
-        assert _spec().satisfies(required)
-
-    def test_a_missing_feature_is_named(self) -> None:
-        required = FeatureSpec.build(robot_features("follower", [*JOINTS, "wrist_roll"]))
-
-        reasons = _spec().missing_from(required)
-
-        assert reasons == [
-            "action.follower.wrist_roll.pos is missing",
-            "observation.follower.wrist_roll.pos is missing",
-        ]
-
-    def test_a_resolution_mismatch_reports_both_shapes(self) -> None:
-        """The actionable fix is reselecting the camera, so the message has to say what it found."""
-        required = FeatureSpec.build(camera_features({"overhead": (720, 1280, 3)}))
-
-        reasons = _spec().missing_from(required)
-
-        assert reasons == ["observation.images.overhead has shape (480, 640, 3), expected (720, 1280, 3)"]
-        assert not _spec().satisfies(required)
-
-    def test_a_kind_mismatch_is_reported(self) -> None:
-        required = FeatureSpec((Feature(joint_feature_key("observation", "follower", "gripper"), "action"),))
-
-        reasons = _spec().missing_from(required)
-
-        assert reasons == ["observation.follower.gripper.pos is an observation, expected an action"]
-
-    def test_every_problem_is_reported_not_just_the_first(self) -> None:
-        required = FeatureSpec.build(
-            robot_features("follower", ["nonexistent"]),
-            camera_features({"overhead": (720, 1280, 3)}),
-        )
-
-        assert len(_spec().missing_from(required)) == 3
+class TestSanitize:
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("Overhead Cam", "overhead_cam"),
+            ("  Follower Arm #2 ", "follower_arm_2"),
+            ("already-safe_1", "already-safe_1"),
+            ("Ärm", "_rm"),
+        ],
+    )
+    def test_a_display_name_becomes_a_key(self, name: str, expected: str) -> None:
+        """A key has to survive being a dict key, a zenoh key expression and a column."""
+        assert sanitize_name(name) == expected
