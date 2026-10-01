@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from utils.multiprocessing import ensure_spawn_start_method
-from workers.base import BaseProcessWorker
+from workers.base import BaseProcessWorker, BaseThreadWorker
 
 STARTED = "started"
 TORN_DOWN = "torn-down"
@@ -109,3 +109,66 @@ class TestSigterm:
 
         assert running_worker.is_alive(), "SIGINT should not stop a child worker"
         assert not (tmp_path / TORN_DOWN).exists()
+
+
+class _ThreadMarkerWorker(BaseThreadWorker):
+    """Thread-side twin of ``_MarkerWorker``."""
+
+    ROLE = "ThreadMarkerWorker"
+
+    def __init__(self, markers: Path, *, stop_event: mp.synchronize.Event) -> None:
+        super().__init__(stop_event=stop_event)
+        self._markers = markers
+
+    async def run_loop(self) -> None:
+        (self._markers / STARTED).touch()
+        while not self.should_stop():
+            self.stop_aware_sleep(0.01)
+
+    async def teardown(self) -> None:
+        (self._markers / TORN_DOWN).touch()
+
+
+class TestThreadWorkerContextManager:
+    def test_block_starts_and_stops_the_worker(self, tmp_path: Path) -> None:
+        worker = _ThreadMarkerWorker(tmp_path, stop_event=mp.Event())
+
+        with worker as entered:
+            assert entered is worker
+            _wait_for(tmp_path / STARTED)
+            assert worker.is_alive()
+
+        assert not worker.is_alive()
+        assert (tmp_path / TORN_DOWN).exists()
+
+    def test_the_worker_stops_when_the_body_raises(self, tmp_path: Path) -> None:
+        """The device a worker holds has to be released on the error path too."""
+        worker = _ThreadMarkerWorker(tmp_path, stop_event=mp.Event())
+
+        with pytest.raises(ValueError, match="boom"), worker:
+            _wait_for(tmp_path / STARTED)
+            raise ValueError("boom")
+
+        assert not worker.is_alive()
+
+
+class TestStopPolling:
+    def test_on_poll_runs_while_waiting(self, running_worker: _MarkerWorker) -> None:
+        """A worker cannot exit while the parent stops draining its event queue."""
+        calls = 0
+
+        def poll() -> None:
+            nonlocal calls
+            calls += 1
+
+        running_worker.stop(on_poll=poll)
+
+        assert calls > 0, "stop() never drained while waiting"
+        assert not running_worker.is_alive()
+
+    def test_stop_is_idempotent(self, running_worker: _MarkerWorker) -> None:
+        running_worker.stop()
+        running_worker.stop()
+
+        assert not running_worker.is_alive()
+        assert running_worker.exitcode == 0

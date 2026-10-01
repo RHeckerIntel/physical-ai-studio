@@ -2,33 +2,37 @@
 
 from __future__ import annotations
 
+import asyncio
 import multiprocessing as mp
 import queue
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
-
-from loguru import logger
 
 from exceptions import BaseException as AppBaseException
 from runtime.config_builder import runtime_camera_keys
 from runtime.contract import QueueEventSink, StateEvent
 from runtime.session import RECORDING_TEARDOWN_TIMEOUT_S
 from runtime.worker import RuntimeSessionWorker, WorkerFatal
+from workers.base import ManagedLifecycle
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Sequence
     from multiprocessing.synchronize import Event as EventClass
+    from typing import Self
     from uuid import UUID
 
     from runtime.contract import Command, RuntimeEvent, StateData
+    from runtime.registry import RuntimeSessionRegistry
+    from services.camera_claims import CameraClaim, CameraClaimRegistry
 
 # Teardown may copy a recording cache back to the dataset; give it that long
 # before escalating to SIGTERM.
 STOP_TIMEOUT_S = RECORDING_TEARDOWN_TIMEOUT_S + 5.0
 _EVENT_QUEUE_SIZE = 256
 _READY_POLL_S = 0.02
-_JOIN_POLL_S = 0.1
 
 SessionStatus = Literal["starting", "running", "stopped", "error"]
 
@@ -38,14 +42,17 @@ class RuntimeProcessError(AppBaseException):
         super().__init__(message=message, error_code=error_code, http_status=500)
 
 
-class RuntimeSessionHandle:
+class RuntimeSessionHandle(ManagedLifecycle["RuntimeSessionHandle"]):
     """Start, talk to and stop one RuntimeSessionWorker.
 
-    The session lives exactly as long as the websocket that created it: there
-    is no reattach, so whoever creates a handle is responsible for ``stop()``.
+    The session lives exactly as long as the ``async with`` that opened it:
+    there is no reattach. It holds three things -- the follower's slot in the
+    session registry, its cameras' settings claims, and the worker process --
+    and :meth:`lifecycle` is where it says so, so no caller has to know the
+    list or the order to give them back in.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 -- a session's devices and its two registries
         self,
         session_name: str,
         *,
@@ -54,12 +61,18 @@ class RuntimeSessionHandle:
         follower_name: str | None,
         leader_name: str | None,
         stop_event: EventClass,
+        sessions: RuntimeSessionRegistry,
+        claims: CameraClaimRegistry,
+        camera_claims: Sequence[CameraClaim] = (),
     ) -> None:
         self.session_name = session_name
         self.follower_id = follower_id
         self.follower_name = follower_name
         self.leader_name = leader_name
         self.camera_keys = runtime_camera_keys(document)
+        self._sessions = sessions
+        self._claims = claims
+        self._camera_claims = camera_claims
         self.started_at = datetime.now(UTC)
         self.state: StateData | None = None
         self.error: RuntimeProcessError | None = None
@@ -138,6 +151,27 @@ class RuntimeSessionHandle:
         self._drain()
         return self._events.get_nowait()
 
+    @asynccontextmanager
+    async def lifecycle(self) -> AsyncGenerator[Self]:
+        """Claim the follower and its cameras, spawn the worker, give all three back.
+
+        Order is the point. The worker is entered last so it stops first: the
+        follower must not look free while the process driving it is still
+        finalizing a recording and de-energizing the arm, or the next session
+        claims a robot whose serial port is still open.
+        """
+        async with self._sessions.hold(self):
+            with self._claims.hold(self._camera_claims):
+                try:
+                    await asyncio.to_thread(self.start)
+                except BaseException:
+                    await asyncio.to_thread(self.stop)
+                    raise
+                try:
+                    yield self
+                finally:
+                    await asyncio.to_thread(self.stop)
+
     def stop(self) -> None:
         """Stop the worker through its stop event and wait for teardown. Blocking, idempotent."""
         self._stopping.set()
@@ -154,29 +188,9 @@ class RuntimeSessionHandle:
                 self._stopped.set()
 
     def _stop_worker(self) -> None:
-        if self._worker.pid is None:
-            return
-        self._worker.request_stop()
-        deadline = time.monotonic() + STOP_TIMEOUT_S
-        while self._worker.is_alive() and time.monotonic() < deadline:
-            # Keep reading: a child cannot exit while its queue feeder is
-            # blocked on a full pipe.
-            self._drain()
-            self._worker.join(_JOIN_POLL_S)
-        if self._worker.is_alive():
-            logger.warning(
-                "Runtime session {} (pid {}) did not stop within {}s, terminating",
-                self.session_name,
-                self._worker.pid,
-                STOP_TIMEOUT_S,
-            )
-            self._worker.terminate()
-            self._worker.join(2.0)
-            if self._worker.is_alive():
-                logger.error("Killing runtime session {} (pid {})", self.session_name, self._worker.pid)
-                self._worker.kill()
-                self._worker.join(1.0)
-        self._drain()
+        # ``on_poll`` keeps the event queue draining while we wait: a child cannot
+        # exit while its queue feeder is blocked on a full pipe.
+        self._worker.stop(STOP_TIMEOUT_S, on_poll=self._drain)
 
     def _drain(self) -> None:
         with self._drain_lock:

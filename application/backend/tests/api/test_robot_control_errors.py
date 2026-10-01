@@ -161,9 +161,14 @@ def test_handle_incoming_forwards_save_episode_as_a_command() -> None:
     session.apply.assert_called_once_with(SaveEpisodeCommand(request_id="req-9"))
 
 
-def test_start_runtime_session_starts_then_waits_for_readiness() -> None:
+def test_start_runtime_session_only_waits_for_readiness() -> None:
+    """Spawning is the handle's own context entry; this task just waits for the robot.
+
+    Keeping them apart is what lets the handler race the wait against an
+    incoming disconnect without racing the spawn.
+    """
     handle = MagicMock()
 
     asyncio.run(start_runtime_session(handle))
 
-    assert handle.mock_calls == [call.start(), call.wait_until_ready()]
+    assert handle.mock_calls == [call.wait_until_ready()]

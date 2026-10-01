@@ -32,14 +32,11 @@ from runtime.handle import RuntimeProcessError, RuntimeSessionHandle
 from runtime.ids import runtime_session_name
 from schemas.robot import ReadableRobot, UnavailableRobot
 from services import ProjectCameraService, RobotService
-from services.camera_claims import CameraClaim, CameraClaimRegistry, settings_from_camera
+from services.camera_claims import CameraClaim, settings_from_camera
 
 if TYPE_CHECKING:
-    from runtime.registry import RuntimeSessionRegistry
     from schemas.project_camera import Camera
     from schemas.robot import Robot
-
-_stopping_sessions: set[asyncio.Task[None]] = set()
 
 router = APIRouter(prefix="/api/projects/{project_id}/runtime", tags=["Runtime"])
 
@@ -126,8 +123,7 @@ async def handle_incoming(websocket: WebSocket, handle: RuntimeSessionHandle) ->
 
 
 async def start_runtime_session(handle: RuntimeSessionHandle) -> None:
-    """Spawn the worker, then wait for hardware readiness, off the event loop."""
-    await asyncio.to_thread(handle.start)
+    """Wait for the robot to report connected, off the event loop."""
     await asyncio.to_thread(handle.wait_until_ready)
 
 
@@ -160,22 +156,36 @@ async def _devices_from_handshake(
     return follower, leader, cameras
 
 
-async def _stop_session(
-    handle: RuntimeSessionHandle,
-    sessions: RuntimeSessionRegistry,
-    claims: CameraClaimRegistry,
-    *,
-    registered: bool,
-    claim_generation: int | None,
-) -> None:
-    """Stop the worker, then free the follower and camera claims it held."""
+async def _run_session(websocket: WebSocket, handle: RuntimeSessionHandle) -> None:
+    """Drive one open session: wait for the robot, then pump commands in and events out.
+
+    Returns when the client disconnects or the worker ends. Its tasks are torn
+    down before returning, so none of them is still reading the handle once the
+    caller releases the devices.
+    """
+    incoming_task = asyncio.create_task(handle_incoming(websocket, handle))
+    startup_task = asyncio.create_task(start_runtime_session(handle))
+    outgoing_task: asyncio.Task[None] | None = None
     try:
-        await asyncio.to_thread(handle.stop)
+        done, _ = await asyncio.wait({incoming_task, startup_task}, return_when=asyncio.FIRST_COMPLETED)
+        if incoming_task in done:
+            # Closed or disconnected during startup; the caller stops the worker.
+            incoming_task.result()
+            return
+        startup_task.result()
+
+        outgoing_task = asyncio.create_task(handle_outgoing(websocket, handle))
+        done, pending = await asyncio.wait({incoming_task, outgoing_task}, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            task.result()
     finally:
-        if registered:
-            sessions.release(handle)
-        if claim_generation is not None:
-            claims.release(handle.session_name, generation=claim_generation)
+        tasks = [task for task in (incoming_task, outgoing_task, startup_task) if task is not None and not task.done()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _camera_claims(
@@ -208,7 +218,7 @@ async def runtime_websocket_openapi(project_id: UUID) -> Response:  # noqa: ARG0
 
 
 @router.websocket("/ws")
-async def runtime_websocket(  # noqa: PLR0913, PLR0915
+async def runtime_websocket(  # noqa: PLR0913
     project_id: Annotated[UUID, Depends(get_project_id)],
     robot_service: Annotated[RobotService, Depends(get_robot_service)],
     camera_service: ProjectCameraServiceDep,
@@ -220,12 +230,6 @@ async def runtime_websocket(  # noqa: PLR0913, PLR0915
 ) -> None:
     """Run a runtime session for as long as this websocket is open."""
     await websocket.accept()
-    handle: RuntimeSessionHandle | None = None
-    registered = False
-    incoming_task: asyncio.Task[None] | None = None
-    outgoing_task: asyncio.Task[None] | None = None
-    startup_task: asyncio.Task[None] | None = None
-    claim_generation: int | None = None
     try:
         handshake = await websocket.receive_json("text")
         follower, leader, cameras = await _devices_from_handshake(handshake, project_id, robot_service, camera_service)
@@ -245,34 +249,18 @@ async def runtime_websocket(  # noqa: PLR0913, PLR0915
             follower_name=follower.name,
             leader_name=None if leader is None else leader.name,
             stop_event=sessions.stop_event,
-        )
-        await sessions.acquire(handle)
-        registered = True
-        claim_generation = claims.claim(
-            _camera_claims(
+            sessions=sessions,
+            claims=claims,
+            camera_claims=_camera_claims(
                 cameras=cameras,
                 session_name=name,
                 project_id=project_id,
                 project_name=project.name,
-            )
+            ),
         )
-
-        incoming_task = asyncio.create_task(handle_incoming(websocket, handle))
-        startup_task = asyncio.create_task(start_runtime_session(handle))
-        done, _ = await asyncio.wait({incoming_task, startup_task}, return_when=asyncio.FIRST_COMPLETED)
-        if incoming_task in done:
-            # Closed or disconnected during startup; the finally block stops the worker.
-            incoming_task.result()
-            return
-        startup_task.result()
-
-        outgoing_task = asyncio.create_task(handle_outgoing(websocket, handle))
-        done, pending = await asyncio.wait({incoming_task, outgoing_task}, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            task.result()
+        # The handle knows what it holds and gives all of it back on the way out.
+        async with handle:
+            await _run_session(websocket, handle)
     except WebSocketDisconnect:
         pass
     except Exception as exc:
@@ -285,24 +273,3 @@ async def runtime_websocket(  # noqa: PLR0913, PLR0915
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
         except Exception as close_exc:
             logger.error("Could not close websocket after exception: {}", close_exc)
-    finally:
-        tasks = [task for task in (incoming_task, outgoing_task, startup_task) if task is not None and not task.done()]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if handle is not None:
-            # Shielded: teardown finalizes the recording and releases the arm,
-            # and the robot must stay claimed until it has, even if this
-            # handler is cancelled.
-            stop_task = asyncio.create_task(
-                _stop_session(
-                    handle,
-                    sessions,
-                    claims,
-                    registered=registered,
-                    claim_generation=claim_generation,
-                )
-            )
-            _stopping_sessions.add(stop_task)
-            stop_task.add_done_callback(_stopping_sessions.discard)
-            await asyncio.shield(stop_task)

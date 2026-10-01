@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import psutil
 from loguru import logger
 
+from workers.base import BaseProcessWorker
 from workers.dataset_import_worker import DatasetImportWorker
 from workers.training_worker import TrainingWorker
 
@@ -27,7 +28,7 @@ class Scheduler:
         self.job_interrupt_flags = self.manager.dict()
         self.event_queue: mp.Queue = mp.Queue()
 
-        self.processes: list[mp.Process] = []
+        self.processes: list[BaseProcessWorker] = []
         self.threads: list[threading.Thread] = []
         logger.info("Scheduler initialized")
 
@@ -71,18 +72,12 @@ class Scheduler:
                 if thread.is_alive():
                     logger.warning(f"Thread {thread.name} did not terminate within timeout")
 
-        # Join processes in reverse order so that consumers are terminated before producers.
+        # Reverse order so that consumers stop before the producers they read from.
+        # ``stop()`` owns the join/SIGTERM/SIGKILL escalation; restating it here
+        # would be a second copy to keep in step with the worker's own teardown.
         for process in self.processes[::-1]:
-            if process.is_alive():
-                logger.debug(f"Joining process: {process.name}")
-                process.join(timeout=10)
-                if process.is_alive():
-                    logger.warning(f"Force terminating process: {process.name}")
-                    process.terminate()
-                    process.join(timeout=2)
-                    if process.is_alive():
-                        logger.error(f"Force killing process {process.name}")
-                        process.kill()
+            logger.debug(f"Stopping process: {process.name}")
+            process.stop()
 
         logger.info("All workers shut down gracefully")
 

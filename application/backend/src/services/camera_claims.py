@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from exceptions import CameraSettingsConflictError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
     from uuid import UUID
 
     from schemas.project_camera import Camera
@@ -75,6 +76,20 @@ class CameraClaimRegistry:
             holder = claims[0].holder
             self._generation[holder] = self._generation.get(holder, 0) + 1
             return self._generation[holder]
+
+    @contextmanager
+    def hold(self, claims: Sequence[CameraClaim]) -> Iterator[None]:
+        """Pin ``claims`` for the body of the block, and unpin them after.
+
+        Nothing to unpin when ``claims`` is empty, which is also why the
+        generation is tracked per holder rather than assumed.
+        """
+        generation = self.claim(claims)
+        try:
+            yield
+        finally:
+            if claims:
+                self.release(claims[0].holder, generation=generation)
 
     def release(self, holder: str, *, generation: int | None = None) -> None:
         with self._lock:

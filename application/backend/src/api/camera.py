@@ -119,22 +119,18 @@ async def camera_websocket(
 
     await websocket.accept()
 
-    worker = None
     try:
         if camera.fingerprint is None:
             raise ValueError("Camera must be reselected")
-        worker = CameraWorker(
+        # The worker holds the camera for as long as it runs, so its lifetime is
+        # this block's: leaving here releases the device however we leave.
+        with CameraWorker(
             camera,
             scheduler.mp_stop_event,
             is_locked=claims.holder_of(camera.fingerprint) is not None,
-        )
-        worker.start()
-        while True:
-            async with run_at_frequency(camera.payload.fps):
-                frame = worker.get_frame()
-                await websocket.send_bytes(encode_jpeg_rgb(frame))
+        ) as worker:
+            while True:
+                async with run_at_frequency(camera.payload.fps):
+                    await websocket.send_bytes(encode_jpeg_rgb(worker.get_frame()))
     except WebSocketDisconnect:
         pass
-    finally:
-        if worker:
-            worker.stop()

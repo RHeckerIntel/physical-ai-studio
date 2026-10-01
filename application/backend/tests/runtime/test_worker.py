@@ -6,6 +6,7 @@ import multiprocessing as mp
 import queue
 import time
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -13,6 +14,8 @@ import pytest
 from runtime.contract import AckEvent, SaveEpisodeCommand, SetFollowerSourceCommand, StateEvent
 from runtime.handle import RuntimeProcessError, RuntimeSessionHandle
 from runtime.ids import runtime_session_name
+from runtime.registry import RuntimeSessionRegistry
+from services.camera_claims import CameraClaimRegistry
 from tests.runtime.test_session import _document, _document_with_leader
 
 if TYPE_CHECKING:
@@ -31,6 +34,8 @@ def _handle(document: dict[str, Any], stop_event: Any | None = None) -> RuntimeS
         follower_name="follower",
         leader_name=None,
         stop_event=stop_event if stop_event is not None else mp.Event(),
+        sessions=RuntimeSessionRegistry(),
+        claims=CameraClaimRegistry(),
     )
 
 
@@ -163,3 +168,35 @@ def test_stop_is_idempotent(started: Callable[..., RuntimeSessionHandle]) -> Non
     handle.stop()
 
     assert not handle.is_alive()
+
+
+class TestHandleAsContextManager:
+    """The handle owns what it holds: entering claims and spawns, leaving gives back."""
+
+    async def test_enter_spawns_and_exit_stops(self) -> None:
+        handle = _handle(_document())
+
+        async with handle as entered:
+            assert entered is handle
+            assert handle.pid is not None
+            assert handle.is_alive()
+
+        assert not handle.is_alive()
+        assert handle.stopping
+
+    async def test_a_failed_spawn_stops_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``__aexit__`` does not run for a failed ``__aenter__``.
+
+        A spawn that failed part-way can still have left a child holding the arm
+        and the cameras, and nothing else would come back for it.
+        """
+        handle = _handle(_document())
+        monkeypatch.setattr(handle, "start", MagicMock(side_effect=RuntimeError("spawn failed")))
+        stop = MagicMock(wraps=handle.stop)
+        monkeypatch.setattr(handle, "stop", stop)
+
+        with pytest.raises(RuntimeError, match="spawn failed"):
+            async with handle:
+                pytest.fail("the body must not run")
+
+        stop.assert_called_once()

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import multiprocessing as mp
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from exceptions import RuntimeSessionBusyError
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from multiprocessing.synchronize import Event as EventClass
 
     from runtime.handle import RuntimeSessionHandle
@@ -46,6 +48,20 @@ class RuntimeSessionRegistry:
             await asyncio.to_thread(existing.stop)
             if self._sessions.get(name) is existing:
                 del self._sessions[name]
+
+    @asynccontextmanager
+    async def hold(self, handle: RuntimeSessionHandle) -> AsyncIterator[RuntimeSessionHandle]:
+        """Claim the follower for the body of the block, and give it back after.
+
+        The slot is this registry's to release, so it releases it -- a caller
+        that hand-rolled acquire/release could drop the pairing on an error path
+        and leave a robot unusable until the backend restarts.
+        """
+        await self.acquire(handle)
+        try:
+            yield handle
+        finally:
+            self.release(handle)
 
     def release(self, handle: RuntimeSessionHandle) -> None:
         """Drop ``handle`` if it still holds its slot."""

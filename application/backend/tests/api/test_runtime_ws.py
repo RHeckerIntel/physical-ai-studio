@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import multiprocessing as mp
+import time
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -17,9 +20,10 @@ from api.dependencies import (
 )
 from exceptions import ResourceNotFoundError, ResourceType
 from main import app
+from runtime.handle import RuntimeSessionHandle
 from runtime.registry import RuntimeSessionRegistry
 from schemas.project_camera import CameraAdapter
-from services.camera_claims import CameraClaimRegistry
+from services.camera_claims import CameraClaim, CameraClaimRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -160,13 +164,111 @@ def test_a_failed_start_releases_the_claim_and_the_follower(
             handle = handle_cls.return_value
             handle.session_name = f"rt-{ROBOT_ID}"
             handle.stopping = False
-            handle.start.side_effect = RuntimeError("spawn failed")
+            # A real handle stops itself when its spawn raises; the session block
+            # still has to give back the follower and the camera claims.
+            handle.__aenter__ = AsyncMock(side_effect=RuntimeError("spawn failed"))
             websocket.send_json({"follower_id": str(ROBOT_ID), "camera_ids": [str(CAMERA_ID)]})
             payload = websocket.receive_json()
     finally:
         app.dependency_overrides.clear()
 
     assert payload["event"] == "error"
-    handle.stop.assert_called_once()
     assert claims.holder_of({"serial": "cam-front"}) is None
     assert sessions.count() == 0
+
+
+class TestSessionLifecycle:
+    """The follower must never look free while its worker is still shutting down."""
+
+    @staticmethod
+    def _handle(sessions: RuntimeSessionRegistry, claims: CameraClaimRegistry, name: str) -> RuntimeSessionHandle:
+        return RuntimeSessionHandle(
+            name,
+            follower_id=ROBOT_ID,
+            document={"init_args": {}},
+            follower_name="follower",
+            leader_name=None,
+            stop_event=mp.Event(),
+            sessions=sessions,
+            claims=claims,
+            camera_claims=[
+                CameraClaim(
+                    fingerprint={"serial": "cam-front"},
+                    settings=(640, 480, 30),
+                    holder=name,
+                    project_id=PROJECT_ID,
+                    project_name="project",
+                )
+            ],
+        )
+
+    async def test_everything_is_claimed_and_given_back(
+        self, claims: CameraClaimRegistry, sessions: RuntimeSessionRegistry
+    ) -> None:
+        order: list[str] = []
+        handle = self._handle(sessions, claims, f"rt-{ROBOT_ID}")
+        handle.start = MagicMock()  # type: ignore[method-assign]
+        handle.stop = MagicMock(side_effect=lambda: (time.sleep(0.2), order.append("worker gone")))  # type: ignore[method-assign]
+
+        async with handle:
+            assert sessions.count() == 1
+            assert claims.holder_of({"serial": "cam-front"}) is not None
+        order.append("devices freed")
+
+        assert order == ["worker gone", "devices freed"]
+        assert sessions.count() == 0
+        assert claims.holder_of({"serial": "cam-front"}) is None
+
+    async def test_a_failed_spawn_gives_everything_back(
+        self, claims: CameraClaimRegistry, sessions: RuntimeSessionRegistry
+    ) -> None:
+        """``__aexit__`` never runs for a failed ``__aenter__``; the stack unwinds anyway."""
+        handle = self._handle(sessions, claims, f"rt-{ROBOT_ID}")
+        handle.start = MagicMock(side_effect=RuntimeError("spawn failed"))  # type: ignore[method-assign]
+        stop = MagicMock()
+        handle.stop = stop  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="spawn failed"):
+            async with handle:
+                pytest.fail("the body must not run")
+
+        stop.assert_called_once()
+        assert sessions.count() == 0
+        assert claims.holder_of({"serial": "cam-front"}) is None
+
+    async def test_a_second_cancellation_cannot_free_the_follower_early(
+        self, claims: CameraClaimRegistry, sessions: RuntimeSessionRegistry
+    ) -> None:
+        """A client disconnect during server shutdown delivers two cancellations.
+
+        Without the shielded unwind the second one cuts short the wait for the
+        worker, so the follower is handed back while its old process still holds
+        the serial port and the cameras, and the next session fails on a busy
+        device.
+        """
+        order: list[str] = []
+        handle = self._handle(sessions, claims, f"rt-{ROBOT_ID}")
+        handle.start = MagicMock()  # type: ignore[method-assign]
+        handle.stop = MagicMock(side_effect=lambda: (time.sleep(0.4), order.append("worker gone")))  # type: ignore[method-assign]
+
+        release = sessions.release
+        sessions.release = lambda h: (order.append("follower freed"), release(h))  # type: ignore[method-assign]
+
+        async def session() -> None:
+            async with handle:
+                await asyncio.sleep(3600)
+
+        task = asyncio.create_task(session())
+        await asyncio.sleep(0.1)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0.05)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(1.5)
+
+        assert order == ["worker gone", "follower freed"], (
+            "the follower was handed back before its worker had released the devices"
+        )
+        assert sessions.count() == 0
+        assert claims.holder_of({"serial": "cam-front"}) is None
