@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable
     from multiprocessing.queues import Queue
     from multiprocessing.synchronize import Event as EventClass
+    from types import FrameType
 
 import loguru
 from loguru import logger
@@ -59,6 +60,11 @@ def log_threads(log_level="DEBUG") -> None:  # noqa: ANN001
 class StoppableMixin:
     """Mixin providing stop-aware functionality using external stop event."""
 
+    # Set from a signal handler, so it stays a plain attribute rather than an
+    # Event: setting an Event takes its lock, and taking that lock inside a
+    # handler can deadlock against the code the signal interrupted.
+    _signalled: bool = False
+
     def should_stop(self) -> bool:
         """Check if a stop has been requested."""
         if not hasattr(self, "_interrupt_event"):
@@ -71,7 +77,7 @@ class StoppableMixin:
         parent_process = mp.parent_process()
         parent_died = parent_process is not None and not parent_process.is_alive()
 
-        return self._interrupt_event.is_set() or self._stop_event.is_set() or parent_died  # type: ignore
+        return self._signalled or self._interrupt_event.is_set() or self._stop_event.is_set() or parent_died  # type: ignore
 
     def stop_aware_sleep(self, seconds: float) -> bool:
         """
@@ -141,16 +147,25 @@ class BaseProcessWorker(mp.Process, StoppableMixin, ABC):
 
     # Internal + final run orchestration
 
-    @staticmethod
-    def _install_signal_policy() -> None:
+    def _install_signal_policy(self) -> None:
         """
-        Ignore shutdown signals (SIGINT) in child processes.
+        Route shutdown signals in child processes through the stop flag.
 
-        This function prevents child processes from handling shutdown signals directly,
-        ensuring that cleanup is coordinated through the parent process via the stop_event
-        mechanism.
+        SIGINT stays ignored: Ctrl+C reaches the whole process group, and cleanup is
+        coordinated through the parent process via the stop_event mechanism.
+
+        SIGTERM is handled rather than left on its default disposition, which ends the
+        process between two bytecodes and so skips ``teardown()``. A worker that dies
+        that way strands whatever it holds -- a camera publisher, for one, infers that
+        its last subscriber is gone from a clean disconnect, and without one it keeps
+        the device open indefinitely.
         """
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, self._handle_terminate)
+
+    def _handle_terminate(self, _signum: int, _frame: FrameType | None) -> None:
+        """Ask the run loop to stop so ``run()`` still reaches ``teardown()``."""
+        self._signalled = True
 
     def _auto_name(self) -> str:
         """Generate a name for the process based on its role and PIDs."""
