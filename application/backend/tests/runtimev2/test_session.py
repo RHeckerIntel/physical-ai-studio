@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import numpy as np
 import pytest
 
 from runtimev2.session import RuntimeSession
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 JOINTS = ("shoulder_pan", "gripper")
 
@@ -220,3 +223,129 @@ class TestCommandsNeedAnEnvironment:
         async with RuntimeSession(_Factory()) as session:
             with pytest.raises(RuntimeError, match="No environment is loaded"):
                 session.require_environment()
+
+
+class _FakeMutation:
+    def __init__(self) -> None:
+        self.saved = 0
+        self.discarded = 0
+        self.torn_down = 0
+
+    def add_frame(self, obs: dict, act: dict, task: str) -> None: ...
+
+    def save_episode(self) -> None:
+        self.saved += 1
+
+    def discard_buffer(self) -> None:
+        self.discarded += 1
+
+    def teardown(self) -> None:
+        self.torn_down += 1
+
+
+@pytest.fixture
+def dataset(monkeypatch: pytest.MonkeyPatch) -> list[_FakeMutation]:
+    """Open datasets without touching the filesystem."""
+    from runtimev2.recording import LoadedDataset
+
+    opened: list[_FakeMutation] = []
+
+    def open_for_recording(dataset_id: Any, path: Any, shape: Any, *, requested_fps: int, **_: Any) -> tuple[Any, Any]:
+        mutation = _FakeMutation()
+        opened.append(mutation)
+        return LoadedDataset(dataset_id=dataset_id, path=path, fps=requested_fps), mutation
+
+    monkeypatch.setattr("runtimev2.session.open_for_recording", open_for_recording)
+    return opened
+
+
+class TestDatasetAboveEnvironment:
+    """A dataset is chosen once and outlives any set of connected devices."""
+
+    async def test_a_dataset_survives_an_environment_reload(self, dataset: list[_FakeMutation], tmp_path: Path) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.load_dataset(uuid4(), tmp_path, hz=10)
+            assert session.state().dataset_loaded
+
+            await session.load(environment)
+
+            assert session.state().dataset_loaded, "the swap dropped the dataset"
+            assert session.state().dataset_hz == 10
+            assert len(dataset) == 2, "it was not reopened against the new shape"
+
+    async def test_a_dataset_can_be_chosen_before_an_environment(
+        self, dataset: list[_FakeMutation], tmp_path: Path
+    ) -> None:
+        """It opens when one arrives, because a row's columns come from the devices."""
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load_dataset(uuid4(), tmp_path, hz=10)
+            assert not session.state().dataset_loaded
+            assert dataset == []
+
+            await session.load(environment)
+
+            assert session.state().dataset_loaded
+            assert len(dataset) == 1
+
+    async def test_unloading_the_environment_keeps_the_dataset(
+        self, dataset: list[_FakeMutation], tmp_path: Path
+    ) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.load_dataset(uuid4(), tmp_path, hz=10)
+            await session.unload()
+
+            assert session.state().dataset_loaded, "unloading the devices closed the dataset"
+            assert dataset[0].torn_down == 0
+
+    async def test_leaving_the_session_closes_the_dataset(self, dataset: list[_FakeMutation], tmp_path: Path) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.load_dataset(uuid4(), tmp_path, hz=10)
+
+        assert dataset[0].torn_down == 1, "the recording cache was never copied back"
+
+
+class TestRecordingCommands:
+    async def test_recording_needs_a_dataset(self) -> None:
+        async with RuntimeSession(_Factory()) as session:
+            with pytest.raises(RuntimeError, match="No dataset is open"):
+                session.start_recording("a task")
+
+    async def test_an_episode_is_started_and_saved(self, dataset: list[_FakeMutation], tmp_path: Path) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.load_dataset(uuid4(), tmp_path, hz=10)
+            session.start_recording("pick up the cube")
+            assert session.state().is_recording
+            assert session.state().task == "pick up the cube"
+
+            await session.save_episode()
+
+            assert not session.state().is_recording
+            assert session.state().episodes_recorded == 1
+            assert dataset[0].saved == 1
+
+    async def test_an_episode_can_be_discarded(self, dataset: list[_FakeMutation], tmp_path: Path) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.load_dataset(uuid4(), tmp_path, hz=10)
+            session.start_recording("a task")
+
+            await session.discard_episode()
+
+            assert dataset[0].discarded == 1
+            assert session.state().episodes_recorded == 0

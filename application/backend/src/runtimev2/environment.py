@@ -81,8 +81,14 @@ class CameraShape:
 
 
 @dataclass(frozen=True, slots=True)
-class EnvironmentShape:
-    """Everything an environment contributes to a session's features."""
+class SessionShape:
+    """The devices a session runs, and therefore the data it carries.
+
+    Read out of an environment, but named for the session rather than the
+    environment because everything in one conforms to it: the store is keyed by
+    it, a dataset can only be appended to if it matches, and a model can only be
+    loaded if it fits. It outlives any particular set of connected devices.
+    """
 
     robots: tuple[RobotShape, ...]
     cameras: tuple[CameraShape, ...]
@@ -127,7 +133,7 @@ def _camera_fps(camera: Camera) -> float:
 async def describe_environment(
     environment: EnvironmentWithRelations,
     factory: RobotClientFactory,
-) -> EnvironmentShape:
+) -> SessionShape:
     """Return an environment's shape, with nothing attached.
 
     Robot feature keys come from the robot's display name. That is editable, so
@@ -161,7 +167,7 @@ async def describe_environment(
     ]
 
     _reject_key_collisions(robots, cameras)
-    return EnvironmentShape(robots=tuple(robots), cameras=tuple(cameras))
+    return SessionShape(robots=tuple(robots), cameras=tuple(cameras))
 
 
 async def _describe_robot(

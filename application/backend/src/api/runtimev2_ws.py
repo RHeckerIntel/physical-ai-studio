@@ -21,12 +21,21 @@ from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
 from loguru import logger
 
-from api.dependencies import EnvironmentServiceDep, RobotClientFactoryDep, get_environment_id, get_project_id
+from api.dependencies import (
+    DatasetServiceDep,
+    EnvironmentServiceDep,
+    RobotClientFactoryDep,
+    get_dataset_id,
+    get_environment_id,
+    get_project_id,
+)
 from exceptions import BaseException as AppBaseException
-from runtimev2.session import RuntimeSession
+from runtimev2.session import DEFAULT_DATASET_HZ, RuntimeSession
+from settings import get_settings
 
 if TYPE_CHECKING:
     from runtimev2.store import FeatureStore
+    from services.dataset_service import DatasetService
     from services.environment_service import EnvironmentService
 
 router = APIRouter(prefix="/api/projects/{project_id}/runtimev2", tags=["Runtime v2"])
@@ -53,6 +62,12 @@ def _state_message(session: RuntimeSession) -> dict[str, Any]:
             "cameras": list(loaded.cameras) if loaded else [],
             "teleoperating": loaded.teleoperating if loaded else False,
             "features": loaded.features if loaded else 0,
+            "dataset_loaded": state.dataset_loaded,
+            "dataset_id": state.dataset_id,
+            "dataset_hz": state.dataset_hz,
+            "is_recording": state.is_recording,
+            "episodes_recorded": state.episodes_recorded,
+            "task": state.task,
         },
     }
 
@@ -84,6 +99,7 @@ async def _handle_incoming(
     websocket: WebSocket,
     session: RuntimeSession,
     environment_service: EnvironmentService,
+    dataset_service: DatasetService,
     project_id: UUID,
 ) -> None:
     """Translate client messages into calls on the session.
@@ -99,7 +115,7 @@ async def _handle_incoming(
             if event == "disconnect":
                 return
             try:
-                await _apply(websocket, session, environment_service, project_id, message)
+                await _apply(websocket, session, environment_service, dataset_service, project_id, message)
             except Exception as exc:
                 logger.warning("runtimev2 command {} failed: {}", event, exc)
                 await websocket.send_json(_error_message(exc))
@@ -111,6 +127,7 @@ async def _apply(
     websocket: WebSocket,
     session: RuntimeSession,
     environment_service: EnvironmentService,
+    dataset_service: DatasetService,
     project_id: UUID,
     message: dict[str, Any],
 ) -> None:
@@ -125,6 +142,21 @@ async def _apply(
         await session.unload()
     elif event == "set_teleoperating":
         session.require_environment().set_teleoperating(bool(message.get("enabled")))
+    elif event == "load_dataset":
+        dataset = await dataset_service.get_dataset_by_id(get_dataset_id(message["dataset_id"]))
+        await session.load_dataset(
+            dataset.id,
+            get_settings().datasets_dir / str(dataset.id),
+            hz=int(message.get("hz") or DEFAULT_DATASET_HZ),
+        )
+    elif event == "unload_dataset":
+        await session.unload_dataset()
+    elif event == "start_recording":
+        session.start_recording(str(message["task"]))
+    elif event == "save_episode":
+        await session.save_episode()
+    elif event == "discard_episode":
+        await session.discard_episode()
     else:
         logger.debug("Ignoring unknown runtimev2 event {}", event)
         return
@@ -158,6 +190,7 @@ async def runtimev2_websocket_openapi(project_id: UUID) -> Response:  # noqa: AR
 async def runtimev2_websocket(
     project_id: Annotated[UUID, Depends(get_project_id)],
     environment_service: EnvironmentServiceDep,
+    dataset_service: DatasetServiceDep,
     robot_client_factory: RobotClientFactoryDep,
     websocket: WebSocket,
 ) -> None:
@@ -175,7 +208,9 @@ async def runtimev2_websocket(
     try:
         async with RuntimeSession(robot_client_factory) as session:
             await websocket.send_json(_state_message(session))
-            incoming = asyncio.create_task(_handle_incoming(websocket, session, environment_service, project_id))
+            incoming = asyncio.create_task(
+                _handle_incoming(websocket, session, environment_service, dataset_service, project_id)
+            )
             outgoing = asyncio.create_task(_handle_outgoing(websocket, session))
             try:
                 done, pending = await asyncio.wait({incoming, outgoing}, return_when=asyncio.FIRST_COMPLETED)

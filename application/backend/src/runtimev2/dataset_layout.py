@@ -31,7 +31,7 @@ from runtimev2.features import IMAGE_INFIX, OBSERVATION_PREFIX
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from runtimev2.environment import EnvironmentShape
+    from runtimev2.environment import SessionShape
 
 ACTION_KEY = "action"
 STATE_KEY = f"{OBSERVATION_PREFIX}.state"
@@ -58,7 +58,7 @@ class DatasetLayout:
     entries: dict[str, LayoutEntry]
 
     @classmethod
-    def from_environment(cls, shape: EnvironmentShape) -> DatasetLayout:
+    def from_shape(cls, shape: SessionShape) -> DatasetLayout:
         """Project an environment onto the layout a recording of it would have.
 
         Only the follower's joints are packed. An environment can hold a leader

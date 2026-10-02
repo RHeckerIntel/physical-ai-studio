@@ -23,6 +23,7 @@ from loguru import logger
 from runtimev2.environment import describe_environment
 from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, image_feature_key, joint_feature_key
 from runtimev2.store import FeatureStore
+from runtimev2.workers.base import ThreadedWorker
 from runtimev2.workers.camera import CameraWorker
 from runtimev2.workers.robot import RobotWorker
 from runtimev2.workers.teleop import TeleopSource, joint_mapping
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from robots.robot_client_factory import RobotClientFactory
-    from runtimev2.environment import CameraShape, EnvironmentShape, RobotShape
+    from runtimev2.environment import CameraShape, RobotShape, SessionShape
     from schemas.environment import EnvironmentWithRelations
     from schemas.project_camera import Camera as CameraRow
     from schemas.robot import ReadableRobot
@@ -70,11 +71,16 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         self._environment = environment
         self._factory = factory
         self._robot_hz = robot_hz
-        self._shape: EnvironmentShape | None = None
+        self._shape: SessionShape | None = None
         self._store: FeatureStore | None = None
         self._robots: dict[str, RobotWorker] = {}
         self._cameras: dict[str, CameraWorker] = {}
         self._teleop: TeleopSource | None = None
+        # Workers that come and go while the devices stay connected -- a
+        # dataset or a model is chosen above the environment and can be swapped
+        # without dropping the arms. Each keeps its own teardown so it can be
+        # detached on its own.
+        self._attached: dict[str, tuple[ThreadedWorker, AsyncExitStack]] = {}
 
     @property
     def name(self) -> str:
@@ -92,7 +98,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         return self._store
 
     @property
-    def shape(self) -> EnvironmentShape:
+    def shape(self) -> SessionShape:
         """The devices and features this environment contributes.
 
         Raises:
@@ -167,12 +173,47 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
                     self._teleop = teleop
                 yield self
             finally:
+                # Detached first: an attached worker was entered on its own
+                # stack, so unwinding this one would not reach it.
+                for key in list(self._attached):
+                    await self.detach(key)
                 # Cleared before the stack unwinds, so a client reading state
                 # mid-unload is not handed workers on their way out.
                 self._robots.clear()
                 self._cameras.clear()
                 self._teleop = None
         logger.info("Unloaded {}", self._environment.name)
+
+    async def attach(self, key: str, worker: ThreadedWorker) -> None:
+        """Run ``worker`` alongside the devices, replacing anything under ``key``.
+
+        The previous one is detached first, so two workers cannot both be
+        writing the same features. A worker that fails to start leaves nothing
+        attached rather than a half-entered one.
+
+        Raises:
+            BaseException: Whatever the worker raised while acquiring.
+        """
+        await self.detach(key)
+        stack = AsyncExitStack()
+        try:
+            await stack.enter_async_context(worker)
+        except BaseException:
+            await stack.aclose()
+            raise
+        self._attached[key] = (worker, stack)
+        logger.info("Attached {} to {}", key, self._environment.name)
+
+    async def detach(self, key: str) -> None:
+        """Stop and release the worker under ``key``. Idempotent."""
+        entry = self._attached.pop(key, None)
+        if entry is None:
+            return
+        await entry[1].aclose()
+        logger.info("Detached {} from {}", key, self._environment.name)
+
+    def attached(self, key: str) -> ThreadedWorker | None:
+        return entry[0] if (entry := self._attached.get(key)) else None
 
     async def _robot_worker(self, shape: RobotShape) -> RobotWorker:
         """Build an unconnected robot worker for ``shape``.
