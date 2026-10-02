@@ -19,7 +19,7 @@ def _shape(*, followers: int = 1, leader: bool = False, cameras: bool = True) ->
     if leader:
         robots.append(RobotShape(key="leader", robot_id="rl", role="leader", joint_names=JOINTS))
     camera_shapes = (
-        [CameraShape(key="overhead", name="overhead", camera_id="c0", shape=(480, 640, 3))] if cameras else []
+        [CameraShape(key="overhead", name="overhead", camera_id="c0", shape=(480, 640, 3), fps=30.0)] if cameras else []
     )
     return EnvironmentShape(robots=tuple(robots), cameras=tuple(camera_shapes))
 

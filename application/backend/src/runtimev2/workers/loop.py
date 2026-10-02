@@ -42,7 +42,16 @@ def run_at(worker: Tickable, hz: float, should_stop: Callable[[], bool]) -> None
     next_report = time.monotonic() + _OVERRUN_REPORT_INTERVAL_S
     while not should_stop():
         started = time.monotonic()
-        worker.tick()
+        try:
+            worker.tick()
+        except Exception:
+            # This runs on the worker's own thread, so an escaping exception
+            # would otherwise kill it without a trace: the environment would
+            # still look loaded while a device quietly stopped being read.
+            # Re-raised after logging, because a worker that cannot tick has
+            # nothing useful left to do.
+            logger.exception("{} failed a tick and is stopping", worker.name)
+            raise
         elapsed = time.monotonic() - started
         if elapsed > period:
             overruns += 1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ import numpy as np
 import pytest
 from loguru import logger
 
+from runtimev2.environment import RobotShape
 from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, FeatureSpec, joint_feature_key, robot_features
 from runtimev2.store import FeatureStore
 from runtimev2.workers.loop import run_at
@@ -46,8 +48,15 @@ class _FakeRobot:
     sent: list[np.ndarray] = field(default_factory=list)
     tick_delay: float = 0.0
 
-    def connect(self) -> None: ...
-    def disconnect(self) -> None: ...
+    connected: bool = False
+    disconnects: int = 0
+
+    def connect(self) -> None:
+        self.connected = True
+
+    def disconnect(self) -> None:
+        self.connected = False
+        self.disconnects += 1
 
     def get_observation(self) -> _Observation:
         if self.tick_delay:
@@ -58,10 +67,17 @@ class _FakeRobot:
         self.sent.append(np.array(action))
 
 
+SHAPE = RobotShape(key="follower", robot_id="r0", role="follower", joint_names=tuple(JOINTS))
+
+
 def _setup(*, write_actions: bool = False) -> tuple[_FakeRobot, FeatureStore, RobotWorker]:
     robot = _FakeRobot()
     store = FeatureStore(FeatureSpec.build(robot_features("follower", JOINTS)))
-    worker = RobotWorker(robot, store, name="follower", write_actions=write_actions)
+    worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0, write_actions=write_actions)
+    # ``tick`` needs the robot connected; these tests drive ticks directly
+    # rather than through the worker's own thread.
+    robot.connect()
+    worker._connected = True
     return robot, store, worker
 
 
@@ -210,3 +226,42 @@ class TestRunAt:
             run_at(worker, hz=50, should_stop=should_stop)
 
         assert [message for message in messages if "missed" in message] == []
+
+
+class TestAsAWorker:
+    """The worker owns its robot and its thread, not just a tick."""
+
+    async def test_entering_connects_and_leaving_disconnects(self) -> None:
+        robot = _FakeRobot()
+        store = FeatureStore(FeatureSpec.build(robot_features("follower", JOINTS)))
+        worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0)
+
+        async with worker:
+            assert robot.connected
+            await asyncio.sleep(0.1)
+            assert len(store.snapshot(worker.observation_keys)) == len(JOINTS), "the worker's own thread never ticked"
+
+        assert not robot.connected
+        assert robot.disconnects == 1
+
+    async def test_a_robot_that_disagrees_on_joint_order_is_refused(self) -> None:
+        """The action vector is built in the described order, so a mismatch would
+        send joint values to the wrong joints while the arm is live."""
+        robot = _FakeRobot()
+        robot.joint_names = list(reversed(JOINTS))
+        store = FeatureStore(FeatureSpec.build(robot_features("follower", JOINTS)))
+        worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0)
+
+        with pytest.raises(RuntimeError, match="once connected"):
+            async with worker:
+                pass
+
+        assert robot.disconnects == 1, "a refused robot was left connected"
+
+    async def test_ticking_outside_acquire_is_refused(self) -> None:
+        robot = _FakeRobot()
+        store = FeatureStore(FeatureSpec.build(robot_features("follower", JOINTS)))
+        worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0)
+
+        with pytest.raises(RuntimeError, match="not connected"):
+            worker.tick()

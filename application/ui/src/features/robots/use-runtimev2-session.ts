@@ -15,6 +15,7 @@ export interface RuntimeV2State {
     loaded: boolean;
     environment: string | null;
     robots: Record<string, string>;
+    cameras: string[];
     teleoperating: boolean;
     features: number;
 }

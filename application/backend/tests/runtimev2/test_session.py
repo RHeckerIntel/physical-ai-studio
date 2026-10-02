@@ -56,7 +56,7 @@ class _SharedRobot:
     def get_observation(self) -> _Observation:
         with self.lock:
             return _Observation(
-                joint_positions=np.full(len(JOINTS), self.position, dtype=np.float32),
+                joint_positions=np.full(len(self.reported_joints), self.position, dtype=np.float32),
                 timestamp=100.0 + self.position,
             )
 

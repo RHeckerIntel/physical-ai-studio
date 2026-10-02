@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -57,7 +58,7 @@ class _SharedRobot:
     def get_observation(self) -> _Observation:
         with self.lock:
             return _Observation(
-                joint_positions=np.full(len(JOINTS), self.position, dtype=np.float32),
+                joint_positions=np.full(len(self.reported_joints), self.position, dtype=np.float32),
                 timestamp=100.0 + self.position,
             )
 
@@ -83,6 +84,45 @@ class _Teleoperator:
 class _Configured:
     robot: _Row
     tele_operator: _Teleoperator = field(default_factory=_Teleoperator)
+
+
+@dataclass
+class _CameraRow:
+    name: str
+    width: int = 640
+    height: int = 480
+    fps: int = 30
+    id: Any = field(default_factory=uuid4)
+
+    @property
+    def payload(self) -> _CameraRow:
+        return self
+
+
+@dataclass
+class _FakeSharedCamera:
+    """Stands in for a SharedCamera attached to a publisher."""
+
+    shape: tuple[int, int, int] = (480, 640, 3)
+    connected: bool = False
+    disconnects: int = 0
+    connect_error: Exception | None = None
+    reads: int = 0
+
+    def connect(self) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+
+    def disconnect(self) -> None:
+        self.connected = False
+        self.disconnects += 1
+
+    def read_latest(self) -> Any:
+        import numpy as np
+
+        self.reads += 1
+        return SimpleNamespace(data=np.zeros(self.shape, dtype=np.uint8), timestamp=500.0, sequence=0)
 
 
 @dataclass
@@ -256,3 +296,85 @@ class TestTeleoperation:
         with pytest.raises(ValueError, match="same number of joints"):
             async with LoadedEnvironment(environment, factory):
                 pass
+
+
+@pytest.fixture
+def cameras(monkeypatch: pytest.MonkeyPatch) -> dict[str, _FakeSharedCamera]:
+    """Replace the SharedCamera builder so no publisher process is spawned."""
+    built: dict[str, _FakeSharedCamera] = {}
+
+    def build(row: _CameraRow, **_: Any) -> _FakeSharedCamera:
+        return built.setdefault(row.name, _FakeSharedCamera())
+
+    monkeypatch.setattr("utils.camera_factory.build_shared_camera", build)
+    return built
+
+
+def _camera_env() -> tuple[_Environment, _Factory]:
+    environment = _Environment(
+        robots=[_Configured(robot=_Row("follower"))],
+        cameras=[_CameraRow("overhead"), _CameraRow("gripper")],
+    )
+    return environment, _Factory()
+
+
+class TestCameras:
+    async def test_every_camera_is_attached_and_released(self, cameras: dict[str, _FakeSharedCamera]) -> None:
+        environment, factory = _camera_env()
+
+        async with LoadedEnvironment(environment, factory) as loaded:
+            assert set(loaded.state().cameras) == {"overhead", "gripper"}
+            assert all(camera.connected for camera in cameras.values())
+
+        assert all(not camera.connected for camera in cameras.values())
+        assert all(camera.disconnects == 1 for camera in cameras.values())
+
+    async def test_frames_reach_the_store_on_their_own(self, cameras: dict[str, _FakeSharedCamera]) -> None:
+        environment, factory = _camera_env()
+
+        async with LoadedEnvironment(environment, factory) as loaded:
+            await _settle()
+            sample = loaded.store.read("observation.images.overhead")
+
+        assert sample is not None
+        assert sample.value.shape == (480, 640, 3)
+        assert sample.timestamp == 500.0
+        assert cameras["overhead"].reads > 0
+
+    async def test_a_publisher_at_another_resolution_is_resized(self, cameras: dict[str, _FakeSharedCamera]) -> None:
+        """The environment's resolution leads, so an IP camera serving its own
+        size is adapted rather than rejected."""
+        environment, factory = _camera_env()
+        environment.cameras = [_CameraRow("overhead")]
+        cameras["overhead"] = _FakeSharedCamera(shape=(720, 1280, 3))
+
+        async with LoadedEnvironment(environment, factory) as loaded:
+            await _settle()
+            sample = loaded.store.read("observation.images.overhead")
+
+        assert sample is not None
+        assert sample.value.shape == (480, 640, 3), "the declared resolution did not win"
+
+    async def test_a_camera_that_cannot_attach_releases_the_robots(self, cameras: dict[str, _FakeSharedCamera]) -> None:
+        """A busy device is the common failure, and it must not leave an arm energized."""
+        environment, factory = _camera_env()
+        environment.cameras = [_CameraRow("overhead")]
+        cameras["overhead"] = _FakeSharedCamera(connect_error=RuntimeError("device or resource busy"))
+
+        with pytest.raises(RuntimeError, match="busy"):
+            async with LoadedEnvironment(environment, factory):
+                pass
+
+        assert all(not robot.connected for robot in factory.robots.values())
+        assert all(robot.disconnects == 1 for robot in factory.robots.values())
+
+    async def test_cameras_tick_at_their_own_rate(self, cameras: dict[str, _FakeSharedCamera]) -> None:
+        """A 5Hz camera must not be dragged to the robot rate, nor the reverse."""
+        environment, factory = _camera_env()
+        environment.cameras = [_CameraRow("overhead", fps=5)]
+
+        async with LoadedEnvironment(environment, factory) as loaded:
+            await _settle()
+
+            assert loaded.shape.cameras[0].fps == 5.0
+            assert loaded.store.read("observation.images.overhead") is not None

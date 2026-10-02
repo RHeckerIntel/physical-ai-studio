@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, FeatureSpec, joint_feature_key, robot_features
@@ -30,6 +32,7 @@ def _source(store: FeatureStore) -> TeleopSource:
             tuple(_obs("leader", joint) for joint in JOINTS),
             tuple(_act("follower", joint) for joint in JOINTS),
         ),
+        hz=100.0,
     )
 
 
@@ -73,7 +76,7 @@ class TestMappingValidation:
     def test_keys_outside_the_spec_are_refused(self) -> None:
         """A typo would otherwise forward nothing, looking like a dead leader."""
         with pytest.raises(ValueError, match="not a feature of this session"):
-            TeleopSource(_store(), {"observation.nope.pos": _act("follower", "gripper")})
+            TeleopSource(_store(), {"observation.nope.pos": _act("follower", "gripper")}, hz=100.0)
 
     def test_mismatched_joint_counts_are_refused(self) -> None:
         """There is no defensible pairing, so guessing one would move the wrong joints."""
@@ -89,7 +92,9 @@ class TestPartialAuthorship:
     def test_a_second_source_can_own_other_joints(self) -> None:
         """A keyboard driving one joint and a leader the rest need not know each other."""
         store = _store()
-        leader_drives = TeleopSource(store, {_obs("leader", "shoulder_pan"): _act("follower", "shoulder_pan")})
+        leader_drives = TeleopSource(
+            store, {_obs("leader", "shoulder_pan"): _act("follower", "shoulder_pan")}, hz=100.0
+        )
         store.write(_obs("leader", "shoulder_pan"), 3.0, timestamp=1.0)
         store.write(_act("follower", "gripper"), 9.0, timestamp=1.0)  # the "keyboard"
 
@@ -97,3 +102,28 @@ class TestPartialAuthorship:
 
         assert store.read(_act("follower", "shoulder_pan")).value == 3.0
         assert store.read(_act("follower", "gripper")).value == 9.0
+
+
+class TestAsAWorker:
+    """It has a rate but no device, so acquiring is a no-op by design."""
+
+    async def test_entering_starts_forwarding_on_its_own_thread(self) -> None:
+        store = _store()
+        store.write_many({_obs("leader", joint): 2.0 for joint in JOINTS}, timestamp=1.0)
+
+        async with _source(store):
+            await asyncio.sleep(0.1)
+
+        assert store.read(_act("follower", "gripper")).value == 2.0
+
+    async def test_it_stops_forwarding_once_left(self) -> None:
+        store = _store()
+        store.write_many({_obs("leader", joint): 1.0 for joint in JOINTS}, timestamp=1.0)
+
+        async with _source(store):
+            await asyncio.sleep(0.1)
+
+        store.write_many({_obs("leader", joint): 9.0 for joint in JOINTS}, timestamp=2.0)
+        await asyncio.sleep(0.1)
+
+        assert store.read(_act("follower", "gripper")).value == 1.0, "it kept forwarding after unload"

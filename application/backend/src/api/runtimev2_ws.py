@@ -50,6 +50,7 @@ def _state_message(session: RuntimeSession) -> dict[str, Any]:
             "loaded": state.loaded,
             "environment": loaded.environment if loaded else None,
             "robots": loaded.robots if loaded else {},
+            "cameras": list(loaded.cameras) if loaded else [],
             "teleoperating": loaded.teleoperating if loaded else False,
             "features": loaded.features if loaded else 0,
         },

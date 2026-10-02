@@ -20,6 +20,10 @@ from loguru import logger
 
 from runtimev2.features import FeatureSpec, camera_features, robot_features, sanitize_name
 
+# Only reached when a camera row has no fps recorded; the usual case is that it
+# does, because the UI makes you pick a format.
+_DEFAULT_CAMERA_FPS = 30.0
+
 if TYPE_CHECKING:
     from physicalai_studio_plugin import CatalogRobotFactory, SerialPortInfo
 
@@ -71,6 +75,9 @@ class CameraShape:
     ``dataset_layout`` -- and deriving one from the other is not possible."""
     camera_id: str
     shape: tuple[int, int, int]
+    fps: float
+    """The rate its worker ticks at. Each camera runs at its own, independently
+    of the robots and of whatever is recording."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +113,17 @@ def _camera_shape(camera: Camera) -> tuple[int, int, int]:
     return (height, width, 3)
 
 
+def _camera_fps(camera: Camera) -> float:
+    """Return the rate a camera row declares, falling back to a usable default.
+
+    A row with no fps would otherwise divide by zero in the rate loop. The
+    publisher's actual rate may differ; a worker ticking faster simply re-reads
+    the same frame, which its timestamp makes visible.
+    """
+    fps = getattr(camera.payload, "fps", None)
+    return float(fps) if fps else _DEFAULT_CAMERA_FPS
+
+
 async def describe_environment(
     environment: EnvironmentWithRelations,
     factory: RobotClientFactory,
@@ -137,6 +155,7 @@ async def describe_environment(
             name=camera.name,
             camera_id=str(camera.id),
             shape=_camera_shape(camera),
+            fps=_camera_fps(camera),
         )
         for camera in environment.cameras
     ]

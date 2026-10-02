@@ -13,25 +13,38 @@ only in which keys they write and what they compute.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+from runtimev2.workers.base import ThreadedWorker
+
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Generator, Mapping
 
     from runtimev2.store import FeatureStore
 
 
-class TeleopSource:
+class TeleopSource(ThreadedWorker):
     """Copy observation features onto action features, one pair at a time.
 
     Explicit key pairs rather than two robot names: a source that drives only
     part of a robot is the point, and the mapping is the only thing that makes
     one source different from another.
+
+    Holds no device, so ``acquire`` has nothing to do -- it is a worker because
+    it has a rate, not because it owns hardware.
     """
 
-    def __init__(self, store: FeatureStore, mapping: Mapping[str, str], *, name: str = "teleop") -> None:
+    def __init__(
+        self,
+        store: FeatureStore,
+        mapping: Mapping[str, str],
+        *,
+        hz: float,
+        name: str = "teleop",
+    ) -> None:
+        super().__init__(name=name, hz=hz)
         self._store = store
-        self._name = name
         # Materialized so the iteration order is fixed and the keys are
         # validated against the spec once rather than on every tick.
         self._pairs = tuple(mapping.items())
@@ -40,9 +53,10 @@ class TeleopSource:
                 if key not in store.spec:
                     raise ValueError(f"{key!r} is not a feature of this session")
 
-    @property
-    def name(self) -> str:
-        return self._name
+    @contextmanager
+    def acquire(self) -> Generator[None]:
+        """Nothing to hold: the store is the only thing this reads and writes."""
+        yield
 
     @property
     def targets(self) -> tuple[str, ...]:

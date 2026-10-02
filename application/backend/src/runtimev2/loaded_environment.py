@@ -1,50 +1,45 @@
-"""One environment, loaded: its devices, its store and the threads ticking them.
+"""One environment, loaded: its workers, and the store they talk through.
 
 Separate from the session on purpose. A session is a client being connected; a
-loaded environment is a set of robots held open with a store shaped to match
+loaded environment is a set of devices held open with a store shaped to match
 them. Tying the two together would make swapping environments mean dropping the
 client, and the feature spec -- which the store is keyed by and which decides
 what datasets and models fit -- changes with the environment, so the store has
 to be rebuilt when it does.
 
-Everything here is released on the way out, in reverse: the threads stop before
-the robots they drive are disconnected.
+The environment holds no devices and runs no threads itself. Each worker owns
+its own device, its own thread and its own rate, so loading is building the
+store and then entering workers, and unloading is leaving them.
 """
 
 from __future__ import annotations
 
-import asyncio
-import threading
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from runtimev2.environment import describe_environment
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, joint_feature_key
+from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, image_feature_key, joint_feature_key
 from runtimev2.store import FeatureStore
-from runtimev2.workers.loop import run_at
+from runtimev2.workers.camera import CameraWorker
 from runtimev2.workers.robot import RobotWorker
 from runtimev2.workers.teleop import TeleopSource, joint_mapping
 from workers.base import ManagedLifecycle
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
-
-    from physicalai.robot.interface import Robot
+    from collections.abc import AsyncIterator
 
     from robots.robot_client_factory import RobotClientFactory
-    from runtimev2.environment import EnvironmentShape, RobotShape
+    from runtimev2.environment import CameraShape, EnvironmentShape, RobotShape
     from schemas.environment import EnvironmentWithRelations
+    from schemas.project_camera import Camera as CameraRow
     from schemas.robot import ReadableRobot
 
 # A leader is read as fast as it will answer, which is what makes teleoperation
 # feel direct. A follower is written at the same rate it is read.
 DEFAULT_ROBOT_HZ = 100.0
-# Long enough for a tick in flight to finish, short enough that unloading does
-# not feel stuck.
-_THREAD_JOIN_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,12 +49,13 @@ class EnvironmentState:
     environment: str
     robots: dict[str, str] = field(default_factory=dict)
     """Robot key to role."""
+    cameras: tuple[str, ...] = ()
     teleoperating: bool = False
     features: int = 0
 
 
 class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
-    """An environment held open: robots connected, store live, workers ticking.
+    """An environment held open: devices connected, store live, workers ticking.
 
     Opened with ``async with``, or through ``RuntimeSession.load``.
     """
@@ -76,9 +72,9 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         self._robot_hz = robot_hz
         self._shape: EnvironmentShape | None = None
         self._store: FeatureStore | None = None
-        self._workers: dict[str, RobotWorker] = {}
+        self._robots: dict[str, RobotWorker] = {}
+        self._cameras: dict[str, CameraWorker] = {}
         self._teleop: TeleopSource | None = None
-        self._stop = threading.Event()
 
     @property
     def name(self) -> str:
@@ -115,7 +111,8 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         return EnvironmentState(
             environment=self._environment.name,
             robots={robot.key: robot.role for robot in self.shape.robots},
-            teleoperating=any(worker.write_actions for worker in self._workers.values()),
+            cameras=tuple(self._cameras),
+            teleoperating=any(worker.write_actions for worker in self._robots.values()),
             features=len(self.store.spec.features),
         )
 
@@ -133,50 +130,77 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         if self._teleop is None:
             raise RuntimeError("This environment has no leader to teleoperate from")
         for robot in self.shape.followers:
-            self._workers[robot.key].write_actions = enabled
+            self._robots[robot.key].write_actions = enabled
         logger.info("Teleoperation {} for {}", "enabled" if enabled else "disabled", self._environment.name)
 
     @asynccontextmanager
     async def lifecycle(self) -> AsyncIterator[LoadedEnvironment]:
-        """Connect the devices, start the workers, and give all of it back after.
+        """Build the store, then enter every worker.
 
-        Each piece is pushed onto the stack as it is acquired, so a failure part
-        way through releases exactly what was taken.
+        Each worker acquires its own device and starts its own thread, so the
+        only ordering this has to get right is that the store exists first.
+        Leaving unwinds the workers in reverse, and each one stops ticking
+        before releasing what it holds.
         """
         async with AsyncExitStack() as stack:
             self._shape = await describe_environment(self._environment, self._factory)
             self._store = FeatureStore(self._shape.feature_spec())
             logger.info(
-                "Loading {} with {} robots and {} features",
+                "Loading {} with {} robots, {} cameras and {} features",
                 self._environment.name,
                 len(self._shape.robots),
+                len(self._shape.cameras),
                 len(self._store.spec.features),
             )
-
-            robots = {
-                robot.key: await stack.enter_async_context(self._connected(robot)) for robot in self._shape.robots
-            }
-            self._workers = {key: RobotWorker(robot, self._store, name=key) for key, robot in robots.items()}
-            self._teleop = self._build_teleop()
-            stack.enter_context(self._running())
-            yield self
+            try:
+                for shape in self._shape.robots:
+                    robot_worker = await self._robot_worker(shape)
+                    await stack.enter_async_context(robot_worker)
+                    self._robots[shape.key] = robot_worker
+                for camera in self._shape.cameras:
+                    camera_worker = self._camera_worker(camera)
+                    await stack.enter_async_context(camera_worker)
+                    self._cameras[camera.key] = camera_worker
+                teleop = self._build_teleop()
+                if teleop is not None:
+                    await stack.enter_async_context(teleop)
+                    self._teleop = teleop
+                yield self
+            finally:
+                # Cleared before the stack unwinds, so a client reading state
+                # mid-unload is not handed workers on their way out.
+                self._robots.clear()
+                self._cameras.clear()
+                self._teleop = None
         logger.info("Unloaded {}", self._environment.name)
 
-    @asynccontextmanager
-    async def _connected(self, shape: RobotShape) -> AsyncIterator[Robot]:
-        """Connect one robot for the body of the block, and disconnect it after.
+    async def _robot_worker(self, shape: RobotShape) -> RobotWorker:
+        """Build an unconnected robot worker for ``shape``.
 
-        Both calls go off the event loop: connecting spawns the owner process
-        that holds the hardware, and disconnecting waits for it to let go.
+        The robot itself is built here because that is async and needs the
+        factory; connecting it is the worker's own business.
         """
-        row = self._row_for(shape)
-        robot, _definition = await self._factory.build_shared_robot(row)
-        await asyncio.to_thread(robot.connect)
-        try:
-            self._verify_joint_order(shape, robot)
-            yield robot
-        finally:
-            await asyncio.to_thread(robot.disconnect)
+        robot, _definition = await self._factory.build_shared_robot(self._row_for(shape))
+        return RobotWorker(robot, self.store, shape=shape, hz=self._robot_hz)
+
+    def _camera_worker(self, shape: CameraShape) -> CameraWorker:
+        """Build a camera worker for ``shape``.
+
+        It takes a builder rather than a camera because attaching is retried.
+        ``validate_on_connect`` stays off: the environment's declared resolution
+        leads and the worker resizes to it, so an IP camera serving its own size
+        is usable. ``overwrite_settings`` stays off too, so loading an
+        environment cannot reconfigure a camera another session is watching.
+        """
+        from utils.camera_factory import build_shared_camera
+
+        row = self._camera_row_for(shape)
+        return CameraWorker(
+            lambda: build_shared_camera(row, validate_on_connect=False, overwrite_settings=False),
+            self.store,
+            key=image_feature_key(shape.key),
+            hz=shape.fps,
+        )
 
     def _row_for(self, shape: RobotShape) -> ReadableRobot:
         """Find the database row a described robot came from.
@@ -190,23 +214,16 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
                     return candidate
         raise RuntimeError(f"Robot {shape.key} is not part of {self._environment.name}")
 
-    @staticmethod
-    def _verify_joint_order(shape: RobotShape, robot: Robot) -> None:
-        """Fail if the connected robot disagrees with the shape it was described by.
-
-        The spec's joint order comes from a locally constructed driver; the
-        device's comes from the owner process's metadata. An action vector is
-        assembled in the spec's order, so a disagreement would send joint
-        values to the wrong joints -- silently, and while the arm is live.
+    def _camera_row_for(self, shape: CameraShape) -> CameraRow:
+        """Find the database row a described camera came from.
 
         Raises:
-            RuntimeError: The orders differ.
+            RuntimeError: The shape names a camera the environment does not hold.
         """
-        connected = tuple(robot.joint_names)
-        if connected != shape.joint_names:
-            raise RuntimeError(
-                f"Robot {shape.key} reports joints {connected} once connected, but was described as {shape.joint_names}"
-            )
+        for candidate in self._environment.cameras:
+            if str(candidate.id) == shape.camera_id:
+                return candidate
+        raise RuntimeError(f"Camera {shape.key} is not part of {self._environment.name}")
 
     def _build_teleop(self) -> TeleopSource | None:
         """Map each leader's observations onto a follower's actions.
@@ -233,35 +250,5 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
             tuple(joint_feature_key(OBSERVATION_PREFIX, leader.key, joint) for joint in leader.joint_names),
             tuple(joint_feature_key(ACTION_PREFIX, follower.key, joint) for joint in follower.joint_names),
         )
-        return TeleopSource(self.store, mapping)
-
-    @contextmanager
-    def _running(self) -> Iterator[None]:
-        """Tick every worker in its own thread for the body of the block.
-
-        Daemon threads, but they are still joined: a thread holding a robot
-        mid-write has to finish before the robot is disconnected under it.
-        """
-        self._stop.clear()
-        tickers: list[Any] = [*self._workers.values()]
-        if self._teleop is not None:
-            tickers.append(self._teleop)
-        threads = [
-            threading.Thread(
-                target=run_at,
-                args=(ticker, self._robot_hz, self._stop.is_set),
-                name=f"runtimev2-{ticker.name}",
-                daemon=True,
-            )
-            for ticker in tickers
-        ]
-        for thread in threads:
-            thread.start()
-        try:
-            yield
-        finally:
-            self._stop.set()
-            for thread in threads:
-                thread.join(_THREAD_JOIN_TIMEOUT_S)
-                if thread.is_alive():
-                    logger.warning("{} did not stop within {}s", thread.name, _THREAD_JOIN_TIMEOUT_S)
+        # At the robots' rate: a command is only as fresh as the leader it came from.
+        return TeleopSource(self.store, mapping, hz=self._robot_hz)
