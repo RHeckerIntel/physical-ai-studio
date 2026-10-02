@@ -20,6 +20,7 @@ import { Edit as EnvironmentEdit } from './routes/environments/edit';
 import { Layout as EnvironmentsLayout } from './routes/environments/layout';
 import { New as EnvironmentNew } from './routes/environments/new';
 import { EnvironmentShow } from './routes/environments/show';
+import { EnvironmentTeleop } from './routes/environments/teleop';
 import { Index as Models } from './routes/models/index';
 import { Index as Inference } from './routes/models/inference/index';
 import { OpenApi } from './routes/openapi';
@@ -95,6 +96,7 @@ export const paths = {
             overview: environment,
             datasets: environment.path('/datasets'),
             models: environment.path('/models'),
+            teleop: environment.path('/teleop'),
         },
         models: {
             index: models,
@@ -372,6 +374,10 @@ export const router = createBrowserRouter([
                                     {
                                         path: paths.project.environments.models.pattern,
                                         element: <EnvironmentShow />,
+                                    },
+                                    {
+                                        path: paths.project.environments.teleop.pattern,
+                                        element: <EnvironmentTeleop />,
                                     },
                                 ],
                             },

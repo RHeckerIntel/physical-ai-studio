@@ -3,11 +3,12 @@ import { Button, Flex, View } from '@geti-ui/ui';
 import { useProjectId } from '../../features/projects/use-project';
 import { Preview } from '../../features/robots/environment-form/preview';
 import { EnvironmentForm, EnvironmentFormProvider } from '../../features/robots/environment-form/provider';
-import { useEnvironment } from '../../features/robots/use-environment';
+import { useEnvironment, useEnvironmentId } from '../../features/robots/use-environment';
 import { paths } from '../../router';
 
 const Header = () => {
     const { project_id } = useProjectId();
+    const { environment_id } = useEnvironmentId();
 
     return (
         <Flex width='100%'>
@@ -20,7 +21,13 @@ const Header = () => {
                 marginBottom={'size-200'}
                 marginTop={'size-100'}
             >
-                <Flex justifyContent={'end'} width='100%'>
+                <Flex justifyContent={'end'} width='100%' gap='size-100'>
+                    <Button
+                        href={paths.project.environments.teleop({ project_id, environment_id })}
+                        variant='secondary'
+                    >
+                        Teleoperate (v2)
+                    </Button>
                     <Button href={paths.project.datasets.index({ project_id })} variant='secondary'>
                         Record dataset
                     </Button>

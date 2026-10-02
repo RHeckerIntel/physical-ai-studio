@@ -13,7 +13,8 @@ from loguru import logger
 
 from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, FeatureSpec, joint_feature_key, robot_features
 from runtimev2.store import FeatureStore
-from runtimev2.workers.robot import RobotWorker, run_at
+from runtimev2.workers.loop import run_at
+from runtimev2.workers.robot import RobotWorker
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

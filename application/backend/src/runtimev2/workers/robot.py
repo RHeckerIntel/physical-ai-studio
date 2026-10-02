@@ -14,7 +14,6 @@ coordination, because the worker only ever reads the store.
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -23,8 +22,6 @@ from loguru import logger
 from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, joint_feature_key
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from physicalai.robot.interface import Robot
 
     from runtimev2.store import FeatureStore
@@ -110,46 +107,3 @@ class RobotWorker:
         except Exception:
             logger.exception("Robot {} rejected an action", self._name)
             raise
-
-
-_OVERRUN_REPORT_INTERVAL_S = 1.0
-
-
-def run_at(worker: RobotWorker, hz: float, should_stop: Callable[[], bool]) -> None:
-    """Tick ``worker`` at ``hz`` until asked to stop.
-
-    Separate from the worker on purpose: the rate belongs to whoever scheduled
-    the robot, and keeping it out of ``tick`` is what lets a test step the
-    worker without waiting for a clock.
-
-    Whether the rate is actually being met is tracked here rather than in the
-    store. A tick that overruns its period is the only place that knows it did,
-    and a consumer reading a stale value cannot tell the difference between a
-    slow producer and one whose value simply has not changed. Overruns are
-    reported at most once per second -- at 100Hz, logging each one would bury
-    the signal in its own noise.
-    """
-    period = 1.0 / hz
-    overruns = 0
-    worst = 0.0
-    next_report = time.monotonic() + _OVERRUN_REPORT_INTERVAL_S
-    while not should_stop():
-        started = time.monotonic()
-        worker.tick()
-        elapsed = time.monotonic() - started
-        if elapsed > period:
-            overruns += 1
-            worst = max(worst, elapsed)
-        else:
-            time.sleep(period - elapsed)
-        now = time.monotonic()
-        if overruns and now >= next_report:
-            logger.warning(
-                "Robot {} missed {} of its {:.0f}Hz deadlines, worst {:.1f}ms",
-                worker.name,
-                overruns,
-                hz,
-                worst * 1000,
-            )
-            overruns, worst = 0, 0.0
-            next_report = now + _OVERRUN_REPORT_INTERVAL_S
