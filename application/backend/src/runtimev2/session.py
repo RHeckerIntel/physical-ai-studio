@@ -29,7 +29,8 @@ from runtime.callbacks.recording import RecordingState
 from runtimev2.control.config import ControlConfig, ModelControlConfig, TeleopControlConfig
 from runtimev2.control.model import ModelControl
 from runtimev2.control.teleop import TeleopControl
-from runtimev2.environment import describe_environment
+from runtimev2.devices import DeviceSet
+from runtimev2.environment import describe_devices
 from runtimev2.inference import LoadedModel, load_model
 from runtimev2.leader import open_leaders
 from runtimev2.loaded_environment import DEFAULT_ROBOT_HZ, LoadedEnvironment
@@ -39,7 +40,7 @@ from runtimev2.workers.dataset import DatasetWorker
 from workers.base import ManagedLifecycle
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
     from pathlib import Path
     from uuid import UUID
 
@@ -48,7 +49,6 @@ if TYPE_CHECKING:
     from robots.robot_client_factory import RobotClientFactory
     from runtimev2.control.base import ControlAlgorithm
     from runtimev2.loaded_environment import EnvironmentState
-    from schemas.environment import EnvironmentWithRelations
 
 # What a brand new dataset records at when the caller does not say. An existing
 # one always uses its own rate.
@@ -159,8 +159,8 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
             control=self._control,
         )
 
-    async def load(self, environment: EnvironmentWithRelations) -> LoadedEnvironment:
-        """Load ``environment``, unloading whatever was loaded before.
+    async def load(self, devices: DeviceSet) -> LoadedEnvironment:
+        """Open ``devices``, releasing whatever was open before.
 
         A failed load leaves the session empty rather than holding a half-built
         environment: whatever was acquired before the failure is released, and
@@ -173,13 +173,13 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
             # Described here rather than inside the environment: the shape is
             # what a dataset and a model are checked against, so the session
             # needs it whether or not the devices come up.
-            shape = await describe_environment(environment, self._factory)
+            shape = await describe_devices(devices, self._factory)
             # Pinned before any camera is opened, so a settings clash is a
             # refusal rather than a session quietly serving the wrong frames.
-            self._pin_cameras(environment, stack)
-            leaders = await open_leaders(environment, shape, self._factory, stack)
+            self._pin_cameras(devices, stack)
+            leaders = await open_leaders(devices, shape, self._factory, stack)
             loaded = await stack.enter_async_context(
-                LoadedEnvironment(environment, self._factory, shape, leaders, robot_hz=self._robot_hz)
+                LoadedEnvironment(devices, self._factory, shape, leaders, robot_hz=self._robot_hz)
             )
         except BaseException:
             await stack.aclose()
@@ -263,24 +263,16 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
         if not self._recording.start(task):
             raise RuntimeError("No dataset is open to record into")
         self._task = task
-        self._retask()
         logger.info("Recording started for task {!r}", task)
 
     def set_task(self, task: str | None) -> None:
-        """Set the instruction a policy is conditioned on and a recording stores."""
-        self._task = task
-        self._retask()
+        """Set the instruction a recording stores.
 
-    def _retask(self) -> None:
-        """Hand the current task to a running policy.
-
-        The same string conditions the policy and labels the recording, so a
-        client that sets one does not have to remember to set the other.
+        Not the one a policy is conditioned on: that belongs to the control's
+        config, so changing it resets the policy rather than leaving it acting
+        on a chunk predicted for the old instruction.
         """
-        if self._loaded is None:
-            return
-        if isinstance(self._control_worker, ModelControl):
-            self._control_worker.task = self._task
+        self._task = task
 
     async def save_episode(self) -> None:
         """Close the open episode and write it.
@@ -323,8 +315,8 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
         if self._loaded is not None:
             await self._open_control()
 
-    def _pin_cameras(self, environment: EnvironmentWithRelations, stack: AsyncExitStack) -> None:
-        """Pin this environment's camera settings for the life of the load.
+    def _pin_cameras(self, devices: DeviceSet, stack: AsyncExitStack) -> None:
+        """Pin this set's camera settings for the life of the load.
 
         Before any camera is opened, so a clash is a refusal rather than a
         session quietly serving frames at another's resolution.
@@ -333,9 +325,9 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
             CameraSettingsConflictError: Another session pinned other settings.
             ValueError: A camera has no fingerprint and must be reselected.
         """
-        if self._pinning is None or not environment.cameras:
+        if self._pinning is None or not devices.cameras:
             return
-        stack.enter_context(self._pinning.hold(environment.cameras))
+        stack.enter_context(self._pinning.hold(devices.cameras))
 
     async def _open_control(self) -> None:
         """Run the chosen control against the loaded environment.
@@ -386,7 +378,10 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
             case ModelControlConfig():
                 if self._policy is None:
                     raise RuntimeError("No model is loaded to drive with")
-                return ModelControl(self._policy, loaded.store, loaded.shape, hz=config.hz, task=self._task)
+                # The config's task, not the session's: what a policy is
+                # conditioned on is part of choosing it, and may legitimately
+                # differ from the label a recording stores.
+                return ModelControl(self._policy, loaded.store, loaded.shape, hz=config.hz, task=config.task)
 
     async def load_policy(
         self,
@@ -462,7 +457,7 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
         await stack.aclose()
 
     @asynccontextmanager
-    async def lifecycle(self) -> AsyncIterator[RuntimeSession]:
+    async def lifecycle(self) -> AsyncGenerator[RuntimeSession]:
         """Hold the session open, unloading anything still loaded on the way out."""
         try:
             yield self

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from physicalai_studio_plugin import CatalogRobotFactory, SerialPortInfo
 
     from robots.robot_client_factory import RobotClientFactory
-    from schemas.environment import EnvironmentWithRelations
+    from runtimev2.devices import DeviceSet
     from schemas.project_camera import Camera
     from schemas.robot import ReadableRobot
 
@@ -139,11 +139,11 @@ def _camera_fps(camera: Camera) -> float:
     return float(fps) if fps else _DEFAULT_CAMERA_FPS
 
 
-async def describe_environment(
-    environment: EnvironmentWithRelations,
+async def describe_devices(
+    devices: DeviceSet,
     factory: RobotClientFactory,
 ) -> SessionShape:
-    """Return an environment's shape, with nothing attached.
+    """Return a device set's shape, with nothing attached.
 
     Robot feature keys come from the robot's display name. That is editable, so
     the keys are session-local only -- which is safe because they never reach
@@ -157,14 +157,8 @@ async def describe_environment(
             collide on a feature key.
     """
     port_finder = _StoredPortFinder(factory)
-    robots: list[RobotShape] = []
-    leaders: list[LeaderShape] = []
-    for configured in environment.robots:
-        robots.append(await _describe_robot(configured.robot, factory, port_finder))
-        teleoperator = getattr(configured.tele_operator, "robot", None)
-        if teleoperator is not None:
-            leaders.append(await _describe_leader(teleoperator, factory, port_finder))
-
+    robots = [await _describe_robot(robot, factory, port_finder) for robot in devices.robots]
+    leaders = [await _describe_leader(leader, factory, port_finder) for leader in devices.leaders]
     cameras = [
         CameraShape(
             key=sanitize_name(camera.name),
@@ -173,7 +167,7 @@ async def describe_environment(
             shape=_camera_shape(camera),
             fps=_camera_fps(camera),
         )
-        for camera in environment.cameras
+        for camera in devices.cameras
     ]
 
     _reject_key_collisions(robots, leaders, cameras)

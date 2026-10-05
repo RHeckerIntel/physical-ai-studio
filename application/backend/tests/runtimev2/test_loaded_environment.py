@@ -15,7 +15,8 @@ import numpy as np
 import pytest
 
 from runtimev2.control.teleop import TeleopControl
-from runtimev2.environment import describe_environment
+from runtimev2.devices import from_environment
+from runtimev2.environment import describe_devices
 from runtimev2.features import OBSERVATION_PREFIX, joint_feature_key
 from runtimev2.leader import open_leaders
 from runtimev2.loaded_environment import LoadedEnvironment
@@ -185,10 +186,11 @@ def _follower_only_env() -> tuple[_Environment, _Factory]:
 async def _loaded(environment: _Environment, factory: _Factory, **kwargs: Any) -> AsyncIterator[LoadedEnvironment]:
     """Describe, open the leaders, then load -- the sequence the session runs."""
     async with AsyncExitStack() as stack:
-        shape = await describe_environment(environment, factory)  # type: ignore[arg-type]
-        leaders = await open_leaders(environment, shape, factory, stack)  # type: ignore[arg-type]
+        devices = from_environment(environment)  # type: ignore[arg-type]
+        shape = await describe_devices(devices, factory)  # type: ignore[arg-type]
+        leaders = await open_leaders(devices, shape, factory, stack)  # type: ignore[arg-type]
         yield await stack.enter_async_context(
-            LoadedEnvironment(environment, factory, shape, leaders, **kwargs)  # type: ignore[arg-type]
+            LoadedEnvironment(devices, factory, shape, leaders, **kwargs)  # type: ignore[arg-type]
         )
 
 

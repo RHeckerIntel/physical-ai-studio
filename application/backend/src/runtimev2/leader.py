@@ -30,8 +30,8 @@ if TYPE_CHECKING:
     from contextlib import AsyncExitStack
 
     from robots.robot_client_factory import RobotClientFactory
+    from runtimev2.devices import DeviceSet
     from runtimev2.environment import LeaderShape, SessionShape
-    from schemas.environment import EnvironmentWithRelations
 
 _READING = tuple[np.ndarray, float]
 
@@ -102,33 +102,20 @@ class LeaderDevice(ManagedLifecycle[None]):
         return np.asarray(observation.joint_positions, dtype=np.float32), float(observation.timestamp)
 
 
-def _leader_row(environment: EnvironmentWithRelations, robot_id: str) -> Any:  # a ReadableRobot
-    """Find the robot row a leader shape came from.
-
-    Raises:
-        RuntimeError: The shape names a leader the environment does not hold.
-    """
-    for configured in environment.robots:
-        teleoperator = getattr(configured.tele_operator, "robot", None)
-        if teleoperator is not None and str(teleoperator.id) == robot_id:
-            return teleoperator
-    raise RuntimeError(f"Leader {robot_id} is not part of this environment")
-
-
 async def open_leaders(
-    environment: EnvironmentWithRelations,
+    devices: DeviceSet,
     shape: SessionShape,
     factory: RobotClientFactory,
     stack: AsyncExitStack,
 ) -> dict[str, LeaderDevice]:
-    """Connect an environment's leader arms onto ``stack``, keyed by feature key.
+    """Connect a device set's leader arms onto ``stack``, keyed by feature key.
 
     Held by the caller rather than by a loaded environment, so a control can be
     swapped without disconnecting the arm.
     """
     leaders: dict[str, LeaderDevice] = {}
     for leader in shape.leaders:
-        driver, _definition = await factory.build_robot_driver(_leader_row(environment, leader.robot_id), factory)
+        driver, _definition = await factory.build_robot_driver(devices.robot_row(leader.robot_id), factory)
         device = LeaderDevice(driver, leader)
         await stack.enter_async_context(device)
         leaders[leader.key] = device

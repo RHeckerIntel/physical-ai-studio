@@ -8,7 +8,8 @@ from uuid import uuid4
 
 import pytest
 
-from runtimev2.environment import describe_environment
+from runtimev2.devices import from_environment
+from runtimev2.environment import describe_devices
 
 JOINTS = ("shoulder_pan", "elbow_flex", "gripper")
 
@@ -62,6 +63,7 @@ class _Configured:
 class _Environment:
     robots: list[_Configured] = field(default_factory=list)
     cameras: list[_Camera] = field(default_factory=list)
+    name: str = "test env"
 
 
 @dataclass
@@ -87,7 +89,7 @@ async def test_a_robots_joints_come_from_its_driver() -> None:
     environment = _Environment(robots=[_Configured(robot=_Robot("Follower Arm"))])
     factory = _Factory(joints={"Follower Arm": ("a", "b")})
 
-    shape = await describe_environment(environment, factory)
+    shape = await describe_devices(from_environment(environment), factory)
 
     assert len(shape.robots) == 1
     assert shape.robots[0].joint_names == ("a", "b")
@@ -99,7 +101,7 @@ async def test_nothing_is_connected() -> None:
     environment = _Environment(robots=[_Configured(robot=_Robot("follower"))])
     factory = _Factory()
 
-    await describe_environment(environment, factory)
+    await describe_devices(from_environment(environment), factory)
 
     assert factory.drivers
     assert not any(driver.connected for driver in factory.drivers)
@@ -112,7 +114,7 @@ async def test_a_teleoperator_is_described_as_a_leader() -> None:
     )
     factory = _Factory(roles={"follower": "follower", "leader": "leader"})
 
-    shape = await describe_environment(environment, factory)
+    shape = await describe_devices(from_environment(environment), factory)
 
     assert [robot.key for robot in shape.robots] == ["follower"]
     assert [leader.key for leader in shape.leaders] == ["leader"]
@@ -125,7 +127,7 @@ async def test_a_teleoperator_is_described_as_a_leader() -> None:
 async def test_a_teleoperator_of_none_adds_nothing() -> None:
     environment = _Environment(robots=[_Configured(robot=_Robot("follower"))])
 
-    shape = await describe_environment(environment, _Factory())
+    shape = await describe_devices(from_environment(environment), _Factory())
 
     assert len(shape.robots) == 1
 
@@ -136,7 +138,7 @@ async def test_display_names_are_sanitized_into_keys() -> None:
         cameras=[_Camera("Overhead Cam")],
     )
 
-    shape = await describe_environment(environment, _Factory())
+    shape = await describe_devices(from_environment(environment), _Factory())
 
     assert shape.robots[0].key == "follower_arm_2"
     assert shape.cameras[0].key == "overhead_cam"
@@ -145,7 +147,7 @@ async def test_display_names_are_sanitized_into_keys() -> None:
 async def test_cameras_carry_their_declared_resolution() -> None:
     environment = _Environment(cameras=[_Camera("overhead", width=1280, height=720)])
 
-    shape = await describe_environment(environment, _Factory())
+    shape = await describe_devices(from_environment(environment), _Factory())
 
     assert shape.cameras[0].shape == (720, 1280, 3)
 
@@ -155,7 +157,7 @@ async def test_names_that_collide_after_sanitizing_are_refused() -> None:
     environment = _Environment(robots=[_Configured(robot=_Robot("Arm A")), _Configured(robot=_Robot("arm a"))])
 
     with pytest.raises(ValueError, match="collide after sanitizing"):
-        await describe_environment(environment, _Factory())
+        await describe_devices(from_environment(environment), _Factory())
 
 
 async def test_the_shape_projects_onto_the_feature_spec() -> None:
@@ -164,7 +166,7 @@ async def test_the_shape_projects_onto_the_feature_spec() -> None:
         cameras=[_Camera("overhead")],
     )
 
-    spec = (await describe_environment(environment, _Factory())).feature_spec()
+    spec = (await describe_devices(from_environment(environment), _Factory())).feature_spec()
 
     assert "observation.follower.gripper.pos" in spec
     assert "action.follower.gripper.pos" in spec

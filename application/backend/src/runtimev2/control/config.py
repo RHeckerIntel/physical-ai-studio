@@ -38,6 +38,13 @@ class ModelControlConfig:
 
     hz: float = DEFAULT_MODEL_HZ
     """How often an action is emitted, not how often inference runs."""
+    task: str | None = None
+    """The instruction the policy is conditioned on.
+
+    Part of the choice rather than a setting on a running control: changing it
+    rebuilds the control, which resets the policy. Otherwise a new instruction
+    would be answered from a chunk predicted for the old one.
+    """
 
     kind: ClassVar[str] = "model"
 
@@ -52,7 +59,10 @@ _BY_KIND: dict[str, type[TeleopControlConfig | ModelControlConfig]] = {
 
 def describe(config: ControlConfig) -> dict[str, Any]:
     """Render a config for a client, kind included."""
-    return {"kind": config.kind, "hz": config.hz}
+    described: dict[str, Any] = {"kind": config.kind, "hz": config.hz}
+    if isinstance(config, ModelControlConfig):
+        described["task"] = config.task
+    return described
 
 
 def parse(payload: Any) -> ControlConfig | None:  # whatever a client sent
@@ -82,6 +92,9 @@ def parse(payload: Any) -> ControlConfig | None:  # whatever a client sent
         if hz <= 0:
             raise ValueError(f"A control rate must be positive, got {hz}")
         options["hz"] = hz
+    if "task" in fields and config_type is ModelControlConfig:
+        task = fields.pop("task")
+        options["task"] = str(task) if task else None
     # Whatever is left was asked for and not understood, which is worth saying
     # rather than silently dropping.
     if fields:

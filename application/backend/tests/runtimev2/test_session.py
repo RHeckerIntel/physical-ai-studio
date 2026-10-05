@@ -14,6 +14,7 @@ import pytest
 
 from runtimev2.control.config import ModelControlConfig, TeleopControlConfig
 from runtimev2.control.teleop import JointMappingError
+from runtimev2.devices import from_environment
 from runtimev2.features import ACTION_PREFIX, joint_feature_key
 from runtimev2.session import RuntimeSession
 
@@ -152,7 +153,7 @@ class TestLoading:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            loaded = await session.load(environment)
+            loaded = await session.load(from_environment(environment))
 
             assert session.environment is loaded
             assert session.state().loaded is True
@@ -162,13 +163,13 @@ class TestLoading:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.unload()
 
             assert session.environment is None
             assert all(not robot.connected for robot in factory.robots.values())
             # Still usable: the point of unloading is to load something else.
-            await session.load(environment)
+            await session.load(from_environment(environment))
             assert session.environment is not None
 
     async def test_unloading_is_idempotent(self) -> None:
@@ -182,7 +183,7 @@ class TestLoading:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
         assert all(not robot.connected for robot in factory.robots.values())
 
@@ -192,9 +193,9 @@ class TestLoading:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             first = dict(factory.robots)
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             assert all(robot.disconnects == 1 for robot in first.values())
             assert all(robot.connected for robot in factory.robots.values())
@@ -205,7 +206,7 @@ class TestLoading:
 
         with pytest.raises(JointMappingError, match="cannot drive"):
             async with RuntimeSession(factory) as session:
-                await session.load(environment)
+                await session.load(from_environment(environment))
 
         assert all(not robot.connected for robot in factory.robots.values())
 
@@ -219,11 +220,11 @@ class TestLoading:
         factory.roles = {"follower": "follower", "leader": "leader", "odd": "leader"}
 
         async with RuntimeSession(factory) as session:
-            await session.load(good)
+            await session.load(from_environment(good))
             factory.joints = {"odd": ("only_one",)}
 
             with pytest.raises(JointMappingError, match="cannot drive"):
-                await session.load(broken)
+                await session.load(from_environment(broken))
 
             assert session.environment is None
 
@@ -276,11 +277,11 @@ class TestDatasetAboveEnvironment:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.load_dataset(uuid4(), tmp_path, hz=10)
             assert session.state().dataset_loaded
 
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             assert session.state().dataset_loaded, "the swap dropped the dataset"
             assert session.state().dataset_hz == 10
@@ -297,7 +298,7 @@ class TestDatasetAboveEnvironment:
             assert not session.state().dataset_loaded
             assert dataset == []
 
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             assert session.state().dataset_loaded
             assert len(dataset) == 1
@@ -308,7 +309,7 @@ class TestDatasetAboveEnvironment:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.load_dataset(uuid4(), tmp_path, hz=10)
             await session.unload()
 
@@ -319,7 +320,7 @@ class TestDatasetAboveEnvironment:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.load_dataset(uuid4(), tmp_path, hz=10)
 
         assert dataset[0].torn_down == 1, "the recording cache was never copied back"
@@ -335,7 +336,7 @@ class TestRecordingCommands:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.load_dataset(uuid4(), tmp_path, hz=10)
             session.start_recording("pick up the cube")
             assert session.state().is_recording
@@ -351,7 +352,7 @@ class TestRecordingCommands:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.load_dataset(uuid4(), tmp_path, hz=10)
             session.start_recording("a task")
 
@@ -394,11 +395,11 @@ class TestPolicyAboveEnvironment:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.load_policy(uuid4(), tmp_path, device="cpu")
             assert session.state().model_loaded
 
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             assert session.state().model_loaded, "the swap dropped the policy"
             assert len(policy) == 2, "it was not reloaded against the new shape"
@@ -410,7 +411,7 @@ class TestPolicyAboveEnvironment:
             await session.load_policy(uuid4(), tmp_path, device="cpu")
             assert not session.state().model_loaded
 
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             assert session.state().model_loaded
             assert len(policy) == 1
@@ -420,7 +421,7 @@ class TestPolicyAboveEnvironment:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             resting = factory.robots["follower"].position
             await session.load_policy(uuid4(), tmp_path, device="cpu")
             await _settle()
@@ -433,22 +434,21 @@ class TestPolicyAboveEnvironment:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.load_policy(uuid4(), tmp_path, device="cpu")
             await _settle()
             action = session.require_environment().store.read(joint_feature_key(ACTION_PREFIX, "follower", "gripper"))
 
         assert action is not None
 
-    async def test_the_task_reaches_a_running_policy(self, policy: list[Any], tmp_path: Path) -> None:
-        """One string conditions the policy and labels the recording."""
+    async def test_the_configured_task_conditions_the_policy(self, policy: list[Any], tmp_path: Path) -> None:
+        """It travels with the choice of control, not as a separate setting."""
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.load_policy(uuid4(), tmp_path, device="cpu")
-            await session.select_control(ModelControlConfig())
-            session.set_task("pick up the cube")
+            await session.select_control(ModelControlConfig(task="pick up the cube"))
             await _settle()
 
             assert policy[0].tasks, "the policy never inferred"
@@ -458,7 +458,7 @@ class TestPolicyAboveEnvironment:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.load_policy(uuid4(), tmp_path, device="cpu")
             await session.unload_policy()
 
@@ -473,7 +473,7 @@ class TestOnlyOneThingDrives:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.select_control(TeleopControlConfig())
             assert session.state().control == TeleopControlConfig()
 
@@ -487,7 +487,7 @@ class TestOnlyOneThingDrives:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.select_control(TeleopControlConfig())
             await session.load_policy(uuid4(), tmp_path, device="cpu")
             await session.select_control(ModelControlConfig())
@@ -500,7 +500,7 @@ class TestOnlyOneThingDrives:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.select_control(TeleopControlConfig())
 
             await session.unload_policy()
@@ -540,7 +540,7 @@ class TestSelectingAControl:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             assert session.state().control is None
 
@@ -548,7 +548,7 @@ class TestSelectingAControl:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.select_control(TeleopControlConfig())
 
             assert session.state().control == TeleopControlConfig()
@@ -558,7 +558,7 @@ class TestSelectingAControl:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.select_control(TeleopControlConfig(hz=50.0))
 
             assert session.state().control == TeleopControlConfig(hz=50.0)
@@ -567,7 +567,7 @@ class TestSelectingAControl:
         environment, factory = _follower_only_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             with pytest.raises(RuntimeError, match="no leader"):
                 await session.select_control(TeleopControlConfig())
@@ -577,10 +577,10 @@ class TestSelectingAControl:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.select_control(TeleopControlConfig())
 
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             assert session.state().control == TeleopControlConfig()
 
@@ -591,7 +591,7 @@ class TestSelectingAControl:
             await session.select_control(TeleopControlConfig())
             assert session.state().environment is None
 
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             assert session.state().control == TeleopControlConfig()
 
@@ -599,7 +599,7 @@ class TestSelectingAControl:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             await session.select_control(TeleopControlConfig())
 
             await session.select_control(None)
@@ -611,7 +611,7 @@ class TestSelectingAControl:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
 
             with pytest.raises(RuntimeError, match="No model is loaded"):
                 await session.select_control(ModelControlConfig())
@@ -624,7 +624,7 @@ class TestSelectingAControlIsEnoughToDrive:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             factory.robots["leader"].position = 1.5
             await _settle()
             assert session.state().control is None
@@ -641,7 +641,7 @@ class TestSelectingAControlIsEnoughToDrive:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             resting = factory.robots["follower"].position
             factory.robots["leader"].position = 1.5
             await _settle()
@@ -654,7 +654,7 @@ class TestSelectingAControlIsEnoughToDrive:
         environment, factory = _teleop_env()
 
         async with RuntimeSession(factory) as session:
-            await session.load(environment)
+            await session.load(from_environment(environment))
             factory.robots["leader"].position = 1.5
             await session.select_control(TeleopControlConfig(hz=200.0))
             await _settle()

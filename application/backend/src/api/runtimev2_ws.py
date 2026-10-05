@@ -26,16 +26,21 @@ from api.dependencies import (
     CameraClaimRegistryDep,
     DatasetServiceDep,
     EnvironmentServiceDep,
+    ProjectCameraServiceDep,
     ProjectServiceDep,
     RobotClientFactoryDep,
+    RobotServiceDep,
+    get_camera_id,
     get_dataset_id,
     get_environment_id,
     get_model_id,
     get_project_id,
+    get_robot_id,
 )
 from exceptions import BaseException as AppBaseException
 from runtimev2.control.config import describe as describe_control
 from runtimev2.control.config import parse as parse_control
+from runtimev2.devices import DeviceSet, from_environment
 from runtimev2.inference import export_dir
 from runtimev2.pinning import CameraPinning
 from runtimev2.session import DEFAULT_DATASET_HZ, RuntimeSession
@@ -46,6 +51,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from runtimev2.store import FeatureStore
+    from services import ProjectCameraService, RobotService
     from services.dataset_service import DatasetService
     from services.environment_service import EnvironmentService
 
@@ -123,11 +129,13 @@ def _observation_message(store: FeatureStore) -> dict[str, Any]:
     }
 
 
-async def _handle_incoming(
+async def _handle_incoming(  # the services a command may need
     websocket: WebSocket,
     session: RuntimeSession,
     environment_service: EnvironmentService,
     dataset_service: DatasetService,
+    robot_service: RobotService,
+    camera_service: ProjectCameraService,
     project_id: UUID,
 ) -> None:
     """Translate client messages into calls on the session.
@@ -152,7 +160,16 @@ async def _handle_incoming(
             request_id = message.get("request_id")
             request_id = str(request_id) if request_id is not None else None
             try:
-                handled = await _apply(websocket, session, environment_service, dataset_service, project_id, message)
+                handled = await _apply(
+                    websocket,
+                    session,
+                    environment_service,
+                    dataset_service,
+                    robot_service,
+                    camera_service,
+                    project_id,
+                    message,
+                )
             except Exception as exc:
                 logger.warning("runtimev2 command {} failed: {}", event, exc)
                 # Reported once, to whoever asked: an identified request gets
@@ -179,6 +196,8 @@ class _Command:
     session: RuntimeSession
     environment_service: EnvironmentService
     dataset_service: DatasetService
+    robot_service: RobotService
+    camera_service: ProjectCameraService
     project_id: UUID
     message: dict[str, Any]
 
@@ -190,7 +209,36 @@ async def _load_environment(command: _Command) -> None:
     environment = await command.environment_service.get_environment_by_id(
         command.project_id, get_environment_id(str(command.arg("environment_id")))
     )
-    await command.session.load(environment)
+    await command.session.load(from_environment(environment))
+
+
+async def _load_devices(command: _Command) -> None:
+    """Open an explicit set of devices, with no environment behind it.
+
+    The setup wizard verifies a robot registered moments ago, so there is no
+    environment to name and there cannot be one.
+    """
+    follower = await command.robot_service.get_robot_by_id(
+        command.project_id, get_robot_id(str(command.arg("follower_id")))
+    )
+    leaders = []
+    if command.arg("leader_id") is not None:
+        leaders.append(
+            await command.robot_service.get_robot_by_id(command.project_id, get_robot_id(str(command.arg("leader_id"))))
+        )
+    cameras = []
+    for raw in command.arg("camera_ids") or []:
+        cameras.append(await command.camera_service.get_camera_by_id(command.project_id, get_camera_id(str(raw))))
+    await command.session.load(
+        DeviceSet(
+            # Named for the robot being driven: there is no environment name to
+            # borrow, and a client showing this wants to know which arm it is.
+            name=follower.name,
+            robots=(follower,),
+            leaders=tuple(leaders),
+            cameras=tuple(cameras),
+        )
+    )
 
 
 async def _unload_environment(command: _Command) -> None:
@@ -253,6 +301,7 @@ async def _unload_model(command: _Command) -> None:
 
 _HANDLERS: dict[str, Callable[[_Command], Awaitable[None]]] = {
     "load_environment": _load_environment,
+    "load_devices": _load_devices,
     "unload_environment": _unload_environment,
     "set_control": _set_control,
     "load_dataset": _load_dataset,
@@ -266,11 +315,13 @@ _HANDLERS: dict[str, Callable[[_Command], Awaitable[None]]] = {
 }
 
 
-async def _apply(
+async def _apply(  # noqa: PLR0913, PLR0917  # the services a command may need
     websocket: WebSocket,
     session: RuntimeSession,
     environment_service: EnvironmentService,
     dataset_service: DatasetService,
+    robot_service: RobotService,
+    camera_service: ProjectCameraService,
     project_id: UUID,
     message: dict[str, Any],
 ) -> bool:
@@ -287,7 +338,9 @@ async def _apply(
     if handler is None:
         logger.debug("Ignoring unknown runtimev2 event {}", event)
         return False
-    await handler(_Command(session, environment_service, dataset_service, project_id, message))
+    await handler(
+        _Command(session, environment_service, dataset_service, robot_service, camera_service, project_id, message)
+    )
     await websocket.send_json(_state_message(session))
     return True
 
@@ -316,11 +369,13 @@ async def runtimev2_websocket_openapi(project_id: UUID) -> Response:  # noqa: AR
 
 
 @router.websocket("/ws")
-async def runtimev2_websocket(
+async def runtimev2_websocket(  # noqa: PLR0913, PLR0917  # one dependency per service a command needs
     project_id: Annotated[UUID, Depends(get_project_id)],
     environment_service: EnvironmentServiceDep,
     dataset_service: DatasetServiceDep,
     robot_client_factory: RobotClientFactoryDep,
+    robot_service: RobotServiceDep,
+    camera_service: ProjectCameraServiceDep,
     project_service: ProjectServiceDep,
     claims: CameraClaimRegistryDep,
     websocket: WebSocket,
@@ -345,7 +400,15 @@ async def runtimev2_websocket(
         async with RuntimeSession(robot_client_factory, pinning) as session:
             await websocket.send_json(_state_message(session))
             incoming = asyncio.create_task(
-                _handle_incoming(websocket, session, environment_service, dataset_service, project_id)
+                _handle_incoming(
+                    websocket,
+                    session,
+                    environment_service,
+                    dataset_service,
+                    robot_service,
+                    camera_service,
+                    project_id,
+                )
             )
             outgoing = asyncio.create_task(_handle_outgoing(websocket, session))
             try:

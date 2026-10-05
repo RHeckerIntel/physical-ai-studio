@@ -32,9 +32,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping
 
     from robots.robot_client_factory import RobotClientFactory
+    from runtimev2.devices import DeviceSet
     from runtimev2.environment import CameraShape, RobotShape, SessionShape
     from runtimev2.leader import LeaderDevice
-    from schemas.environment import EnvironmentWithRelations
     from schemas.project_camera import Camera as CameraRow
     from schemas.robot import ReadableRobot
 
@@ -64,7 +64,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
 
     def __init__(
         self,
-        environment: EnvironmentWithRelations,
+        devices: DeviceSet,
         factory: RobotClientFactory,
         shape: SessionShape,
         leaders: Mapping[str, LeaderDevice],
@@ -76,7 +76,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         Neither is owned here: the shape is what datasets and models are
         checked against, and a leader outlasts any one environment.
         """
-        self._environment = environment
+        self._devices = devices
         self._factory = factory
         self._robot_hz = robot_hz
         self._shape: SessionShape | None = shape
@@ -93,7 +93,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
 
     @property
     def name(self) -> str:
-        return self._environment.name
+        return self._devices.name
 
     @property
     def store(self) -> FeatureStore:
@@ -125,7 +125,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
     def state(self) -> EnvironmentState:
         """Summarize this environment for a client."""
         return EnvironmentState(
-            environment=self._environment.name,
+            environment=self._devices.name,
             robots={robot.key: robot.role for robot in self.shape.robots},
             cameras=tuple(self._cameras),
             leaders=tuple(self._leaders),
@@ -145,7 +145,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
             self._store = FeatureStore(self.shape.feature_spec())
             logger.info(
                 "Loading {} with {} robots, {} leaders, {} cameras and {} features",
-                self._environment.name,
+                self._devices.name,
                 len(self.shape.robots),
                 len(self.shape.leaders),
                 len(self.shape.cameras),
@@ -177,7 +177,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
                 # mid-unload is not handed workers on their way out.
                 self._robots.clear()
                 self._cameras.clear()
-        logger.info("Unloaded {}", self._environment.name)
+        logger.info("Unloaded {}", self._devices.name)
 
     async def attach(self, key: str, worker: ThreadedWorker) -> None:
         """Run ``worker`` alongside the devices, replacing anything under ``key``.
@@ -197,7 +197,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
             await stack.aclose()
             raise
         self._attached[key] = (worker, stack)
-        logger.info("Attached {} to {}", key, self._environment.name)
+        logger.info("Attached {} to {}", key, self._devices.name)
 
     async def detach(self, key: str) -> None:
         """Stop and release the worker under ``key``. Idempotent."""
@@ -205,7 +205,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         if entry is None:
             return
         await entry[1].aclose()
-        logger.info("Detached {} from {}", key, self._environment.name)
+        logger.info("Detached {} from {}", key, self._devices.name)
 
     def attached(self, key: str) -> ThreadedWorker | None:
         return entry[0] if (entry := self._attached.get(key)) else None
@@ -245,24 +245,17 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         """Find the database row a described robot came from.
 
         Raises:
-            RuntimeError: The shape names a robot the environment does not hold.
+            RuntimeError: The shape names a robot this set does not hold.
         """
-        for configured in self._environment.robots:
-            for candidate in (configured.robot, getattr(configured.tele_operator, "robot", None)):
-                if candidate is not None and str(candidate.id) == shape.robot_id:
-                    return candidate
-        raise RuntimeError(f"Robot {shape.key} is not part of {self._environment.name}")
+        return self._devices.robot_row(shape.robot_id)
 
     def _camera_row_for(self, shape: CameraShape) -> CameraRow:
         """Find the database row a described camera came from.
 
         Raises:
-            RuntimeError: The shape names a camera the environment does not hold.
+            RuntimeError: The shape names a camera this set does not hold.
         """
-        for candidate in self._environment.cameras:
-            if str(candidate.id) == shape.camera_id:
-                return candidate
-        raise RuntimeError(f"Camera {shape.key} is not part of {self._environment.name}")
+        return self._devices.camera_row(shape.camera_id)
 
     def pair_for_teleop(self) -> tuple[LeaderDevice, RobotShape] | None:
         """The leader and follower teleoperation would use, if there are any.

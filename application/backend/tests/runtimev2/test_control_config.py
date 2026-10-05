@@ -59,3 +59,30 @@ class TestDescribing:
 
     def test_the_kind_is_included(self) -> None:
         assert describe(TeleopControlConfig())["kind"] == "teleop"
+
+
+class TestTheInferenceTask:
+    """A policy's instruction travels with the choice of control."""
+
+    def test_a_task_is_parsed_for_a_model(self) -> None:
+        assert parse({"kind": "model", "task": "pick up the cube"}) == ModelControlConfig(task="pick up the cube")
+
+    def test_no_task_is_normal(self) -> None:
+        assert parse({"kind": "model"}).task is None
+
+    def test_an_empty_task_is_no_task(self) -> None:
+        assert parse({"kind": "model", "task": ""}).task is None
+
+    def test_it_round_trips(self) -> None:
+        config = ModelControlConfig(hz=5.0, task="fold the towel")
+
+        assert parse(describe(config)) == config
+
+    def test_teleoperation_takes_no_task(self) -> None:
+        """Nothing about a leader arm is conditioned on an instruction."""
+        with pytest.raises(ValueError, match="Unknown options"):
+            parse({"kind": "teleop", "task": "pick up the cube"})
+
+    def test_changing_the_task_changes_the_config(self) -> None:
+        """Which is what makes selecting it reset the policy."""
+        assert ModelControlConfig(task="a") != ModelControlConfig(task="b")
