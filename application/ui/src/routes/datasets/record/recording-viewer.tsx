@@ -40,6 +40,9 @@ export const RecordingViewer = () => {
     if (dataset === undefined) {
         throw 'Cannot load recording viewer without dataset.';
     }
+    if (environment === undefined) {
+        throw 'Cannot load recording viewer without an environment.';
+    }
     const [task, setTask] = useState<string>(dataset.default_task);
 
     const { data: settings } = $api.useSuspenseQuery('get', '/api/settings');

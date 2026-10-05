@@ -7,6 +7,7 @@ import { DockviewReact, DockviewReadyEvent, IDockviewReactProps } from 'dockview
 import { $api } from '../../../api/client';
 import { physicalAiTheme } from '../../dockview';
 import { useProjectId } from '../../projects/use-project';
+import { RuntimeSessionProvider } from '../runtime-session-provider';
 import { ReactComponent as RobotIllustration } from './../../../assets/illustrations/INTEL_08_NO-TESTS.svg';
 import { CameraCell } from './cells/camera-cell';
 import { RobotCell } from './cells/robot-cell';
@@ -39,12 +40,18 @@ const components = {
             camera_ids: string[];
         }>
     ) => {
+        // The form previews robots the user is still choosing, so the session
+        // is opened from the devices themselves rather than a saved environment.
         return (
-            <RobotCell
-                follower_id={props.params.follower_id}
-                leader_id={props.params.leader_id}
-                camera_ids={props.params.camera_ids}
-            />
+            <RuntimeSessionProvider
+                devices={{
+                    follower_id: props.params.follower_id,
+                    leader_id: props.params.leader_id,
+                    camera_ids: props.params.camera_ids,
+                }}
+            >
+                <RobotCell follower_id={props.params.follower_id} leader_id={props.params.leader_id} />
+            </RuntimeSessionProvider>
         );
     },
     camera: (props: IDockviewPanelProps<{ camera_id: string }>) => {

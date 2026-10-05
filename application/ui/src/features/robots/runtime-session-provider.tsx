@@ -1,4 +1,4 @@
-import { createContext, ReactNode, RefObject, useContext, useRef, useState } from 'react';
+import { createContext, ReactNode, RefObject, useContext, useEffect, useRef, useState } from 'react';
 
 import { useMutation, UseMutationResult, useQueryClient } from '@tanstack/react-query';
 
@@ -10,7 +10,7 @@ import {
 } from '../../api/openapi-spec';
 import useWebSocketWithResponse from '../../components/websockets/use-websocket-with-response';
 import { useProjectId } from '../projects/use-project';
-import { FollowerSource } from './use-joint-state';
+import { FollowerSource, isRecoverableRobotControlError } from './use-joint-state';
 import { runtimeV2SocketUrl } from './use-runtimev2-session';
 
 type InferenceDevice = Pick<SchemaInferenceDeviceInfo, 'backend' | 'device'>;
@@ -133,13 +133,24 @@ const toSessionState = (next: Partial<RuntimeV2State>): RuntimeSessionState => (
     episodes_recorded: next.episodes_recorded ?? 0,
 });
 
+/** An explicit set of devices, for a session with no saved environment. */
+export interface SessionDevices {
+    follower_id: string;
+    leader_id?: string;
+    camera_ids: string[];
+}
+
 interface RuntimeSessionProviderProps {
     children: ReactNode;
-    environment: SchemaEnvironmentWithRelations;
+    /** A saved environment to open, or `devices` for one that is not saved. */
+    environment?: SchemaEnvironmentWithRelations;
+    /** Devices to open directly: the environment form previews robots the
+     * user is still choosing, so there is nothing saved to load. */
+    devices?: SessionDevices;
     model?: SchemaModel;
     dataset?: SchemaDatasetOutput;
     inferenceDevice?: InferenceDevice;
-    onError: (error: string) => void;
+    onError?: (error: string) => void;
 }
 
 type MutationResult<TVariables = void> = UseMutationResult<RuntimeApiJsonResponse, Error, TVariables>;
@@ -147,7 +158,8 @@ type MutationResult<TVariables = void> = UseMutationResult<RuntimeApiJsonRespons
 type RuntimeSessionContextValue = {
     observation: RefObject<Record<string, number> | undefined>;
     actions: RefObject<Record<string, number> | undefined>;
-    environment: SchemaEnvironmentWithRelations;
+    /** Undefined when the session was opened from `devices`. */
+    environment: SchemaEnvironmentWithRelations | undefined;
     model: SchemaModel | undefined;
     dataset: SchemaDatasetOutput | undefined;
     inferenceDevice: InferenceDevice | undefined;
@@ -163,6 +175,13 @@ type RuntimeSessionContextValue = {
     readyForInference: boolean;
     readyForRecording: boolean;
     isConnected: boolean;
+    /** The last fatal error and its code. A recoverable one is a `warning`
+     * instead, so a view keeps rendering rather than being replaced. */
+    error: string | null;
+    errorCode: string | null;
+    warning: string | null;
+    /** Reconnect, which ends the old session and opens a new one. */
+    restart: () => void;
 };
 
 const RuntimeSessionContext = createContext<RuntimeSessionContextValue | null>(null);
@@ -200,15 +219,38 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
     const [inferenceDevice, setInferenceDevice] = useState<InferenceDevice | undefined>(props.inferenceDevice);
     const [dataset, setDataset] = useState<SchemaDatasetOutput | undefined>(props.dataset);
     const invalidateEpisodesQuery = useRefreshEpisodes(dataset?.id);
+    const [error, setError] = useState<string | null>(null);
+    const [errorCode, setErrorCode] = useState<string | null>(null);
+    const [warning, setWarning] = useState<string | null>(null);
+    // Changing the URL tears the socket down and opens a new one, which is
+    // what ends a session and starts a fresh one. A query parameter rather
+    // than a fragment: a WebSocket URL may not have one, and the constructor
+    // throws if it does.
+    const [attempt, setAttempt] = useState(0);
+
+    const report = (message: string, code: string | null = null) => {
+        // A lost leader is worth saying and worth recovering from, so it does
+        // not replace the view the way a dead session does.
+        if (isRecoverableRobotControlError(code)) {
+            setWarning(message);
+            return;
+        }
+        setError(message);
+        setErrorCode(code);
+        props.onError?.(message);
+    };
 
     const onOpen = () => {
         // The session opens empty, so loading is a command rather than part of
         // the URL. Everything else waits until the devices are up.
         void (async () => {
+            setError(null);
+            setErrorCode(null);
+            setWarning(null);
             try {
-                await loadEnvironment.mutateAsync(props.environment.id);
+                await openSession.mutateAsync();
             } catch {
-                return; // already reported through onError
+                return; // already reported
             }
             if (props.model && props.inferenceDevice) {
                 loadModel.mutate({ model: props.model, inference_device: props.inferenceDevice });
@@ -220,7 +262,7 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
         })();
     };
 
-    const socket = useWebSocketWithResponse(runtimeV2SocketUrl(project_id), {
+    const socket = useWebSocketWithResponse(`${runtimeV2SocketUrl(project_id)}?attempt=${attempt}`, {
         shouldReconnect: () => true,
         reconnectAttempts: 5,
         reconnectInterval: 3000,
@@ -237,9 +279,13 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
                 const next = message.data as Partial<RuntimeV2State>;
                 driven.current = new Set(Object.keys(next.robots ?? {}));
                 setState(toSessionState(next));
+                setWarning(null);
             }
             if (message.event === 'error') {
-                props.onError(typeof message.message === 'string' ? message.message : 'An unexpected error occurred.');
+                report(
+                    typeof message.message === 'string' ? message.message : 'An unexpected error occurred.',
+                    typeof message.error_code === 'string' ? message.error_code : null
+                );
             }
         },
         onError: console.error,
@@ -249,14 +295,25 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
         onOpen,
     });
 
-    const loadEnvironment = useMutation({
+    /** Open whichever source this provider was given.
+     *
+     * An environment is loaded by id. Devices are named explicitly, which is
+     * what the environment form needs: it previews robots the user is still
+     * choosing, so there is nothing saved to load.
+     */
+    const openSession = useMutation({
         meta: { skipInvalidation: true },
-        mutationFn: async (environment_id: string) =>
-            socket.sendJsonMessageAndWait<RuntimeApiJsonResponse>(
-                { event: 'load_environment', environment_id },
+        mutationFn: async () => {
+            const message =
+                props.environment !== undefined
+                    ? { event: 'load_environment', environment_id: props.environment.id }
+                    : { event: 'load_devices', ...props.devices };
+            return socket.sendJsonMessageAndWait<RuntimeApiJsonResponse>(
+                message,
                 ({ event, data }) => event === 'state' && data?.loaded === true
-            ),
-        onError: (error: Error) => props.onError(error.message),
+            );
+        },
+        onError: (failure: Error) => report(failure.message, 'runtime_session_failed'),
     });
 
     const loadModel = useMutation({
@@ -371,6 +428,10 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
                 readyForInference: state.connected && state.model_loaded,
                 readyForRecording: state.connected && state.dataset_loaded,
                 isConnected: socket.readyState === 1,
+                error,
+                errorCode,
+                warning,
+                restart: () => setAttempt((previous) => previous + 1),
             }}
         >
             {props.children}
@@ -382,4 +443,32 @@ export const useRuntimeSession = () => {
     const ctx = useContext(RuntimeSessionContext);
     if (!ctx) throw new Error('useRuntimeSession must be used within RuntimeSessionProvider');
     return ctx;
+};
+
+/**
+ * Sample the session's observations into state, for a view that renders them.
+ *
+ * The session keeps observations in a ref so a 100Hz robot does not re-render
+ * the page a hundred times a second. A component that draws a model needs
+ * React to see the change, so it samples here instead -- on animation frames,
+ * which stop when the tab is hidden and never outpace the display.
+ */
+export const useSessionJoints = (): Array<{ name: string; value: number }> => {
+    const { observation } = useRuntimeSession();
+    const [joints, setJoints] = useState<Array<{ name: string; value: number }>>([]);
+
+    useEffect(() => {
+        let frame = 0;
+        const sample = () => {
+            const current = observation.current;
+            if (current !== undefined) {
+                setJoints(Object.entries(current).map(([name, value]) => ({ name, value: Number(value) })));
+            }
+            frame = requestAnimationFrame(sample);
+        };
+        frame = requestAnimationFrame(sample);
+        return () => cancelAnimationFrame(frame);
+    }, [observation]);
+
+    return joints;
 };

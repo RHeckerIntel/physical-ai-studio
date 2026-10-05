@@ -7,27 +7,21 @@ import { useProjectId } from '../../../projects/use-project';
 import { RobotViewer, UnavailableRobotViewer } from '../../controller/robot-viewer';
 import { RobotModelsProvider } from '../../robot-models-context';
 import { AvailableSchemaRobot, isUnavailableRobot } from '../../robot-types';
+import { useRuntimeSession, useSessionJoints } from '../../runtime-session-provider';
 import { InlineAlert } from '../../setup-wizard/shared/inline-alert';
-import { useJointState, useSynchronizeModelJoints } from '../../use-joint-state';
+import { useSynchronizeModelJoints } from '../../use-joint-state';
 
 const AvailableRobotCell = ({
     robot,
-    followerId,
     leaderId,
-    cameraIds,
 }: {
     robot: AvailableSchemaRobot;
-    followerId: string;
+    /** Only to decide whether teleoperation is offered; the session is the
+     * provider's, opened from the same devices. */
     leaderId?: string;
-    cameraIds: string[];
 }) => {
-    const { project_id } = useProjectId();
-    const { joints, state, error, errorCode, warning, setFollowerSource, restart } = useJointState(
-        project_id,
-        followerId,
-        leaderId,
-        cameraIds
-    );
+    const { state, error, errorCode, warning, setFollowerSource, restart } = useRuntimeSession();
+    const joints = useSessionJoints();
     useSynchronizeModelJoints(joints, robot.type);
 
     const canTeleoperate = state.has_leader;
@@ -50,11 +44,9 @@ const AvailableRobotCell = ({
                         <br />
                         {error}
                     </InlineAlert>
-                    {errorCode === 'runtime_session_busy' && (
-                        <Button variant='primary' onPress={restart}>
-                            Restart session
-                        </Button>
-                    )}
+                    <Button variant='primary' onPress={restart}>
+                        Try again
+                    </Button>
                 </Flex>
             </View>
         );
@@ -86,7 +78,7 @@ const AvailableRobotCell = ({
             <View position={'absolute'} right={0} top={0} padding='size-100'>
                 <Flex gap='size-100' alignItems='center'>
                     <Button variant='secondary' onPress={restart}>
-                        Restart session
+                        Reconnect
                     </Button>
                     {leaderId !== undefined && (
                         <TooltipTrigger delay={300}>
@@ -98,7 +90,7 @@ const AvailableRobotCell = ({
                                     <Switch
                                         isEmphasized
                                         isSelected={isTeleoperating}
-                                        onChange={(b) => setFollowerSource(b ? 'teleop' : 'hold')}
+                                        onChange={(on) => setFollowerSource.mutate(on ? 'teleop' : 'hold')}
                                         isDisabled={!canTeleoperate}
                                     >
                                         Teleoperate
@@ -121,11 +113,11 @@ const AvailableRobotCell = ({
 export const RobotCell = ({
     follower_id,
     leader_id,
-    camera_ids,
 }: {
     follower_id: string;
+    /** Decides whether teleoperation is offered. The cameras are the
+     * provider's business, not this cell's. */
     leader_id?: string;
-    camera_ids: string[];
 }) => {
     const { project_id } = useProjectId();
 
@@ -138,7 +130,7 @@ export const RobotCell = ({
 
     return (
         <RobotModelsProvider>
-            <AvailableRobotCell robot={robot} followerId={follower_id} leaderId={leader_id} cameraIds={camera_ids} />
+            <AvailableRobotCell robot={robot} leaderId={leader_id} />
         </RobotModelsProvider>
     );
 };

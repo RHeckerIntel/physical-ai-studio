@@ -48,6 +48,10 @@ export const InferenceViewer = ({ tasks }: InferenceViewerProps) => {
         inferenceDevice,
     } = useRuntimeSession();
 
+    if (environment === undefined) {
+        throw 'Cannot load the inference viewer without an environment.';
+    }
+
     const canTeleoperate = state.has_leader;
     const isTeleoperating = state.follower_source === 'teleop';
 
