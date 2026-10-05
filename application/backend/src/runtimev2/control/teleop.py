@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from runtimev2.leader import LeaderDevice
-    from runtimev2.store import FeatureStore
+    from runtimev2.session_store import SessionStore
 
 
 class JointMappingError(RuntimeError):
@@ -49,7 +49,7 @@ class TeleopControl(ControlAlgorithm):
     def __init__(
         self,
         leader: LeaderDevice,
-        store: FeatureStore,
+        store: SessionStore,
         action_keys: Sequence[str],
         *,
         hz: float,

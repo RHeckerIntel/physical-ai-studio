@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from physicalai.inference import InferenceModel
 
     from runtimev2.environment import SessionShape
-    from runtimev2.store import FeatureStore
+    from runtimev2.session_store import SessionStore
 
 
 class ModelCameraMismatchError(RuntimeError):
@@ -66,7 +66,7 @@ class ModelControl(ControlAlgorithm):
     def __init__(
         self,
         model: InferenceModel,
-        store: FeatureStore,
+        store: SessionStore,
         shape: SessionShape,
         *,
         hz: float,

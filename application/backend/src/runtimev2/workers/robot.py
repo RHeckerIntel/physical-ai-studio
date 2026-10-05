@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from physicalai.robot.interface import Robot
 
     from runtimev2.environment import RobotShape
-    from runtimev2.store import FeatureStore
+    from runtimev2.session_store import SessionStore
 
 
 MAX_GOAL_TIME_S = 0.5
@@ -65,7 +65,7 @@ class RobotWorker(ThreadedWorker):
     def __init__(
         self,
         robot: Robot,
-        store: FeatureStore,
+        store: SessionStore,
         *,
         shape: RobotShape,
         hz: float,

@@ -22,7 +22,7 @@ from loguru import logger
 
 from runtimev2.control.teleop import check_pairing
 from runtimev2.features import image_feature_key
-from runtimev2.store import FeatureStore
+from runtimev2.session_store import SessionStore
 from runtimev2.workers.base import ThreadedWorker
 from runtimev2.workers.camera import CameraWorker
 from runtimev2.workers.robot import RobotWorker
@@ -81,7 +81,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         self._robot_hz = robot_hz
         self._shape: SessionShape | None = shape
         self._leaders = leaders
-        self._store: FeatureStore | None = None
+        self._store: SessionStore | None = None
         self._robots: dict[str, RobotWorker] = {}
         self._cameras: dict[str, CameraWorker] = {}
 
@@ -96,7 +96,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         return self._devices.name
 
     @property
-    def store(self) -> FeatureStore:
+    def store(self) -> SessionStore:
         """The environment's current truth.
 
         Raises:
@@ -142,7 +142,10 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         before releasing what it holds.
         """
         async with AsyncExitStack() as stack:
-            self._store = FeatureStore(self.shape.feature_spec())
+            # Scalars go in shared memory so a device loop can be moved into
+            # its own process later without the store changing shape.
+            self._store = SessionStore.create(self.shape.feature_spec())
+            stack.callback(self._store.close)
             logger.info(
                 "Loading {} with {} robots, {} leaders, {} cameras and {} features",
                 self._devices.name,

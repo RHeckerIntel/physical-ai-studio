@@ -50,7 +50,7 @@ from settings import get_settings
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from runtimev2.store import FeatureStore
+    from runtimev2.session_store import SessionStore
     from services import ProjectCameraService, RobotService
     from services.dataset_service import DatasetService
     from services.environment_service import EnvironmentService
@@ -112,7 +112,7 @@ def _error_message(exc: Exception) -> dict[str, Any]:
     return {"event": "error", "message": str(exc), "error_code": "runtime_session_failed"}
 
 
-def _observation_message(store: FeatureStore) -> dict[str, Any]:
+def _observation_message(store: SessionStore) -> dict[str, Any]:
     """Send every scalar feature the store currently holds.
 
     Images are left out: they are not in the store yet, and when they are they

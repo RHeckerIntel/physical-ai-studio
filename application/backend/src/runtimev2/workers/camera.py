@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
     from physicalai.capture.camera import Camera
 
-    from runtimev2.store import FeatureStore
+    from runtimev2.session_store import SessionStore
 
 _COLOR_CHANNELS = 3
 _GRAYSCALE_DIMS = 2
@@ -144,7 +144,7 @@ class CameraWorker(ThreadedWorker):
     def __init__(
         self,
         build: Callable[[], Camera],
-        store: FeatureStore,
+        store: SessionStore,
         *,
         key: str,
         hz: float,

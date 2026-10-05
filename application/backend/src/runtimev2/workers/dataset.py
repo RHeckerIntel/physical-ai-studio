@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
     from runtime.callbacks.recording import RecordingState
     from runtimev2.environment import SessionShape
-    from runtimev2.store import FeatureStore
+    from runtimev2.session_store import SessionStore
 
 
 class DatasetWorker(ThreadedWorker):
@@ -41,7 +41,7 @@ class DatasetWorker(ThreadedWorker):
 
     def __init__(
         self,
-        store: FeatureStore,
+        store: SessionStore,
         recording: RecordingState,
         shape: SessionShape,
         *,

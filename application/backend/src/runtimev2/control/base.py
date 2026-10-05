@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
     import numpy as np
 
-    from runtimev2.store import FeatureStore
+    from runtimev2.session_store import SessionStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +55,7 @@ class ControlAlgorithm(ThreadedWorker, ABC):
 
     def __init__(
         self,
-        store: FeatureStore,
+        store: SessionStore,
         action_keys: Sequence[str],
         *,
         name: str,
