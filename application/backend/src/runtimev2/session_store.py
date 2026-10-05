@@ -1,18 +1,11 @@
 """The session's truth, split by what can usefully cross a process boundary.
 
-Scalars go in shared memory, so a robot running in its own process can publish
-what it measured and read what it is being asked to do. Frames do not: they
-already sit in the camera publisher's shared memory, and copying a megabyte per
-camera per tick through a second channel would buy nothing. A process that
-wants frames attaches to the publisher.
+Scalars go in shared memory. Frames do not: they already sit in the camera
+publisher's, and copying a megabyte per camera per tick would buy nothing.
 
-Callers see one store with one interface and need not care which half a feature
-lives in; the spec already says, because an image feature is marked as one.
-
-The split has a consequence worth knowing: a child process attaching to this
-store sees scalars but no frames. That is deliberate rather than a gap -- a
-recording process reads its own frames from the publisher, which is also how it
-gets them without a copy.
+Callers see one interface; the spec says which half a feature lives in. The
+consequence worth knowing is that a child attaching here sees scalars but no
+frames -- it reads those from the publisher, which is also how it avoids a copy.
 """
 
 from __future__ import annotations
@@ -44,10 +37,7 @@ class SessionStore:
 
     @classmethod
     def attach(cls, spec: FeatureSpec, name: str) -> SessionStore:
-        """Reach a session's scalars from another process.
-
-        The returned store carries no frames: nothing in this process has
-        written any, and the publisher is where they come from.
+        """Reach a session's scalars from another process. Carries no frames.
 
         Raises:
             ValueError: The block is not the size this spec implies.
@@ -77,9 +67,8 @@ class SessionStore:
     def write_many(self, values: Mapping[str, Any], *, timestamp: float) -> None:
         """Record several features measured at the same moment.
 
-        Atomic within each half. A producer writes one device's features, and
-        no device produces both frames and scalars, so nothing needs a
-        guarantee spanning the two.
+        Atomic within each half, which is enough: no device produces both
+        frames and scalars.
 
         Raises:
             UnknownFeatureError: Any key is not in this session's spec.
@@ -102,10 +91,9 @@ class SessionStore:
         return target.read(key)
 
     def snapshot(self, keys: Collection[str] | None = None) -> dict[str, Sample]:
-        """Return the latest sample of every requested feature that has one.
+        """Latest sample of every requested feature that has one.
 
-        Consistent within each half, which is the granularity producers write
-        at. Keys nobody has written are absent rather than ``None``.
+        Consistent within each half. Unwritten keys are absent, not ``None``.
         """
         if keys is None:
             return {**self._shared.snapshot(), **self._images.snapshot()}

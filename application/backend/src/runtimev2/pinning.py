@@ -1,14 +1,12 @@
 """Pin the camera settings a session needs, so a clash is an error.
 
-A publisher process serves one resolution and framerate. A second session
-asking for different ones is handed the first session's instead, and this
-runtime resizes whatever arrives to the resolution its environment declares --
-which would make the mismatch invisible, and a recording labelled 1280x720
-would hold upscaled 640x480 pixels.
+A publisher serves one resolution. A second session asking for another is
+handed the first's, and this runtime resizes to whatever its environment
+declares -- so a recording labelled 1280x720 would hold upscaled 640x480
+pixels, invisibly. Pinning makes that a refusal at load.
 
-Pinning turns that into a refusal at load. It does not stop two sessions
-sharing a camera, which is what the publisher is for; it stops them disagreeing
-about how it is configured.
+It does not stop two sessions sharing a camera, which is what the publisher is
+for. It stops them disagreeing about how it is configured.
 """
 
 from __future__ import annotations
@@ -33,11 +31,9 @@ class CameraPinning:
     """What a session needs in order to pin its cameras.
 
     Attributes:
-        registry: Process-local registry shared with every other session,
-            including the old runtime's, so the two cannot disagree either.
-        project_id: Reported when another session is already holding a camera.
-        project_name: Reported in the same message, which is what makes a
-            conflict actionable rather than puzzling.
+        registry: Shared with every other session, including the old runtime's.
+        project_id: Reported when another session already holds a camera.
+        project_name: Reported with it, which makes a conflict actionable.
         holder: Unique per session, so releasing one cannot unpin another.
     """
 
@@ -52,8 +48,7 @@ class CameraPinning:
 
         Raises:
             CameraSettingsConflictError: Another session pinned other settings.
-            ValueError: A camera has no fingerprint, so it cannot be identified
-                and therefore cannot be pinned.
+            ValueError: A camera has no fingerprint to be pinned against.
         """
         unidentified = [camera.name for camera in cameras if camera.fingerprint is None]
         if unidentified:

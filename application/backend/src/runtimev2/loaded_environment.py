@@ -14,14 +14,17 @@ store and then entering workers, and unloading is leaving them.
 
 from __future__ import annotations
 
+import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from loguru import logger
+from physicalai.config import to_config
 
 from runtimev2.control.teleop import check_pairing
 from runtimev2.features import image_feature_key
+from runtimev2.robot_process import RobotProcess, RobotRecipe
 from runtimev2.session_store import SessionStore
 from runtimev2.workers.base import ThreadedWorker
 from runtimev2.workers.camera import CameraWorker
@@ -41,6 +44,15 @@ if TYPE_CHECKING:
 # A follower is commanded as often as it can be, because that is what makes a
 # slow control's ramp smooth rather than stepped.
 DEFAULT_ROBOT_HZ = 100.0
+
+ROBOTS_IN_PROCESSES = os.getenv("RUNTIMEV2_ROBOT_PROCESSES", "0") == "1"
+"""Whether each robot's loop runs in its own process.
+
+Off by default while the two paths coexist: a process can be scheduled apart
+from image encoding and inference, which is what keeps a 100Hz loop from
+missing its serial deadline, but it is also a new failure surface. Turn it on
+with ``RUNTIMEV2_ROBOT_PROCESSES=1``.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +82,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         leaders: Mapping[str, LeaderDevice],
         *,
         robot_hz: float = DEFAULT_ROBOT_HZ,
+        robots_in_processes: bool = ROBOTS_IN_PROCESSES,
     ) -> None:
         """``shape`` and ``leaders`` are the session's, borrowed for this load.
 
@@ -81,6 +94,7 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         self._robot_hz = robot_hz
         self._shape: SessionShape | None = shape
         self._leaders = leaders
+        self._robots_in_processes = robots_in_processes
         self._store: SessionStore | None = None
         self._robots: dict[str, RobotWorker] = {}
         self._cameras: dict[str, CameraWorker] = {}
@@ -142,8 +156,8 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         before releasing what it holds.
         """
         async with AsyncExitStack() as stack:
-            # Scalars go in shared memory so a device loop can be moved into
-            # its own process later without the store changing shape.
+            # Scalars in shared memory, so a device loop can move into its own
+            # process without the store changing shape.
             self._store = SessionStore.create(self.shape.feature_spec())
             stack.callback(self._store.close)
             logger.info(
@@ -156,9 +170,12 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
             )
             try:
                 for shape in self.shape.robots:
-                    robot_worker = await self._robot_worker(shape)
-                    await stack.enter_async_context(robot_worker)
-                    self._robots[shape.key] = robot_worker
+                    if self._robots_in_processes:
+                        await stack.enter_async_context(await self._robot_process(shape))
+                    else:
+                        robot_worker = await self._robot_worker(shape)
+                        await stack.enter_async_context(robot_worker)
+                        self._robots[shape.key] = robot_worker
                 for camera in self.shape.cameras:
                     camera_worker = self._camera_worker(camera)
                     await stack.enter_async_context(camera_worker)
@@ -224,6 +241,18 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         """
         robot, _definition = await self._factory.build_robot_driver(self._row_for(shape), self._factory)
         return RobotWorker(robot, self.store, shape=shape, hz=self._robot_hz)
+
+    async def _robot_process(self, shape: RobotShape) -> RobotProcess:
+        """Build a robot's loop as its own process.
+
+        The driver is built here, where the database and the attached devices
+        are, and sent over as the recipe physicalai exports runtimes with. The
+        child needs nothing else: it reaches the session's scalars through the
+        shared block.
+        """
+        driver, _definition = await self._factory.build_robot_driver(self._row_for(shape), self._factory)
+        recipe = RobotRecipe(shape=shape, driver=to_config(driver).to_dict(), hz=self._robot_hz)
+        return RobotProcess(recipe, self.shape, self.store.shared_name)
 
     def _camera_worker(self, shape: CameraShape) -> CameraWorker:
         """Build a camera worker for ``shape``.

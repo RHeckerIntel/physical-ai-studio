@@ -142,7 +142,17 @@ class RobotWorker(ThreadedWorker):
         """
         if not self._connected:
             raise RuntimeError(f"Robot {self._shape.key} is not connected")
-        self._drive(self._publish_observation())
+        _t0 = time.monotonic()
+        observation = self._robot.get_observation()
+        _t1 = time.monotonic()
+        positions = np.asarray(observation.joint_positions, dtype=np.float32)
+        self._store.write_many(
+            {key: float(value) for key, value in zip(self._observation_keys, positions, strict=True)},
+            timestamp=observation.timestamp,
+        )
+        self._drive(positions)
+        if time.monotonic() - _t0 > 0.03:
+            logger.warning("SLOWTICK {} read={:.1f}ms", self._shape.key, (_t1 - _t0) * 1000)
 
     def _hold_current_position(self) -> None:
         """Seed the action features with where the arm is.

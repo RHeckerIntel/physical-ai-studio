@@ -1,37 +1,17 @@
 """The session's scalar truth, in memory every process can reach.
 
-Same contract as :class:`~runtimev2.store.FeatureStore` -- latest value per
-feature, each carrying its producer's timestamp -- but backed by a block of
-shared memory, so a robot can run in its own process and still be read by a
-recording in another.
+Same contract as :class:`~runtimev2.store.FeatureStore`, backed by shared
+memory so a robot loop can run in its own process -- which is what keeps it
+from being descheduled into a serial timeout.
 
-That matters for timing rather than throughput. A robot loop has to collect a
-serial reply before the driver's packet timeout; being descheduled costs a
-retry worth tens of milliseconds, which arrives in a recorded episode as a
-frame that is *misdated* rather than dropped, because LeRobot timestamps frames
-by index. Keeping the loop in its own process is what lets it be scheduled
-apart from image encoding and inference.
+Scalars only: frames already live in the camera publisher's shared memory, so
+image features are refused rather than copied through a second channel.
 
-Scalars only. Images already live in the camera publisher's shared memory, so
-they do not need copying through here; a process that wants frames attaches to
-the publisher. :class:`SharedFeatureStore` therefore refuses image features
-rather than pretending to carry them.
-
-Writers never block
--------------------
-Readers and writers coordinate with a seqlock per group rather than a mutex: a
-writer that is descheduled mid-write must not be able to stall the robot loop,
-and a writer that *dies* mid-write must not leave a lock held forever. A writer
-bumps its group's sequence to odd, writes, and bumps it to even; a reader takes
-the sequence, reads, and retries if it moved. So a write is atomic as far as
-any reader can tell -- nobody sees half of a robot's joints updated -- without
-anyone waiting on anyone.
-
-This relies on stores to adjacent ``int64``/``float64`` cells becoming visible
-in program order, which holds on the x86-64 and arm64 targets this runs on.
-There is no portable memory barrier available from Python; the alternative is a
-cross-process mutex, whose failure mode -- a dead holder wedging every reader
--- is worse than the one being avoided.
+Readers and writers coordinate with a seqlock per group, not a mutex. A writer
+must not be able to stall the robot loop, and one that *dies* mid-write must
+not leave a lock held. This assumes stores to adjacent cells become visible in
+program order, which holds on x86-64 and arm64; Python offers no portable
+barrier, and a dead mutex holder wedging every reader is the worse failure.
 """
 
 from __future__ import annotations
@@ -62,12 +42,10 @@ middle of one. Returning what we have beats spinning in a robot's loop.
 
 
 def group_of(key: str) -> str:
-    """The group a feature is written as part of.
+    """The group a feature is written as part of: its first two segments.
 
-    The first two segments: ``observation.follower.wrist.pos`` belongs to
-    ``observation.follower``. Groups exist because ``write_many`` is always one
-    producer publishing one device's features at one instant, and that is
-    exactly the granularity a reader must not see split.
+    ``write_many`` is always one producer publishing one device at one instant,
+    which is the granularity a reader must not see split.
     """
     parts = key.split(".", 2)
     return ".".join(parts[:2])
@@ -77,8 +55,7 @@ def group_of(key: str) -> str:
 class Layout:
     """Where each feature and group lives in the block.
 
-    Fixed when a session is described, which is what makes the block a fixed
-    size and lets another process map it knowing only the spec.
+    Fixed by the spec, so another process maps it knowing only the session.
     """
 
     keys: tuple[str, ...]
@@ -86,11 +63,8 @@ class Layout:
 
     @classmethod
     def build(cls, spec: FeatureSpec) -> Layout:
-        """Lay out every scalar feature in ``spec``, grouped by producer.
-
-        Sorted, so two processes computing the layout from the same spec agree
-        without having to exchange it.
-        """
+        """Lay out ``spec``'s scalars, sorted so two processes agree without
+        exchanging anything."""
         # FeatureSpec.keys() is its own method, not a mapping's.
         keys = tuple(sorted(key for key in spec.keys() if not spec[key].is_image))  # noqa: SIM118
         groups = tuple(sorted({group_of(key) for key in keys}))
@@ -110,8 +84,7 @@ class Layout:
 class SharedFeatureStore:
     """Latest sample per scalar feature, in shared memory.
 
-    Create one with :meth:`create` and reach it from another process with
-    :meth:`attach`, passing the name and the same spec.
+    :meth:`create` here, :meth:`attach` from another process with the same spec.
     """
 
     def __init__(self, spec: FeatureSpec, block: shared_memory.SharedMemory, *, owner: bool) -> None:
@@ -137,8 +110,7 @@ class SharedFeatureStore:
         store = cls(spec, block, owner=True)
         store._seq[:] = 0
         store._values[:] = 0.0
-        # NaN is "nobody has written this": distinguishable from a real zero,
-        # which a joint at its origin legitimately reports.
+        # NaN means unwritten: a joint at its origin reports a real zero.
         store._stamps[:] = math.nan
         return store
 
@@ -147,8 +119,7 @@ class SharedFeatureStore:
         """Map a block another process created, for the same ``spec``.
 
         Raises:
-            ValueError: The block is not the size this spec implies, which
-                means the two processes disagree about the session.
+            ValueError: Wrong size, so the two disagree about the session.
         """
         block = shared_memory.SharedMemory(name=name)
         expected = max(Layout.build(spec).nbytes, _WORD)
@@ -177,12 +148,11 @@ class SharedFeatureStore:
     def write_many(self, values: Mapping[str, Any], *, timestamp: float) -> None:
         """Record several features measured at the same moment.
 
-        Atomic per group, so a reader cannot catch half of a robot's joints
-        updated. Writing across groups bumps each one, which is as consistent
-        as the producers were -- nothing here invents a wider guarantee.
+        Atomic per group, so a reader cannot catch half a robot's joints
+        updated. Across groups it is only as consistent as the producers were.
 
         Raises:
-            UnknownFeatureError: Any key is not a scalar feature of this session.
+            UnknownFeatureError: Any key is not a scalar of this session.
         """
         unknown = [key for key in values if key not in self._index]
         if unknown:
@@ -205,11 +175,9 @@ class SharedFeatureStore:
         return self.snapshot((key,)).get(key)
 
     def snapshot(self, keys: Collection[str] | None = None) -> dict[str, Sample]:
-        """Return the latest sample of every requested feature that has one.
+        """Latest sample of every requested feature that has one.
 
-        Consistent per group: each group is read between two equal, even
-        sequence numbers, so the values in it were written together. Keys
-        nobody has written are absent rather than ``None``.
+        Consistent per group. Unwritten keys are absent rather than ``None``.
         """
         wanted = self._layout.keys if keys is None else tuple(key for key in keys if key in self._index)
         by_group: dict[int, list[str]] = {}
@@ -222,11 +190,10 @@ class SharedFeatureStore:
         return samples
 
     def _read_group(self, group: int, keys: list[str]) -> dict[str, Sample]:
-        """Read one group's keys between two equal, even sequence numbers.
+        """Read one group between two equal, even sequence numbers.
 
-        An odd sequence, or one that moved while we read, means a writer was
-        mid-write: the values may be from two different instants, so they are
-        discarded and read again.
+        A moved sequence means a writer was mid-write, so the values could span
+        two instants and are read again.
         """
         indices = [self._index[key] for key in keys]
         for _ in range(_READ_ATTEMPTS):

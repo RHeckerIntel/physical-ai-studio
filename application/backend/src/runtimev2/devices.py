@@ -1,14 +1,11 @@
 """The devices a session runs, named, with the rows they came from.
 
-A saved environment is one way to say which devices to use. The setup wizard is
-another: it verifies a robot that was registered moments ago, so there is no
-environment to load and there cannot be one. Both reduce to the same thing --
-some robots to drive, some to read, some cameras, and a name to call them by --
-so the runtime takes that rather than an environment row.
+A saved environment is one way to say which devices to use; the setup wizard is
+another, verifying a robot registered moments ago with no environment to load.
+Both reduce to robots to drive, robots to read, cameras, and a name.
 
-Rows and not ids, because describing a robot needs its type and port to build a
-driver, and opening a camera needs its fingerprint and declared resolution.
-Whoever resolves the ids has the services to do it; this is what they produce.
+Rows rather than ids, because building a driver needs a robot's type and port
+and opening a camera needs its fingerprint and resolution.
 """
 
 from __future__ import annotations
@@ -27,11 +24,10 @@ class DeviceSet:
     """What to open, and what to call it.
 
     Attributes:
-        name: Shown to a client and used in logs. An environment's name, or
-            something descriptive for an unsaved set.
+        name: Shown to a client and used in logs.
         robots: Robots this session drives.
-        leaders: Robots it only reads. Separate because nothing commands them,
-            which is also why they contribute no action features.
+        leaders: Robots it only reads -- separate because nothing commands
+            them, which is why they contribute no action features.
         cameras: Cameras to open, at the resolution their rows declare.
     """
 
@@ -66,8 +62,7 @@ class DeviceSet:
 def from_environment(environment: EnvironmentWithRelations) -> DeviceSet:
     """Read a device set out of a saved environment.
 
-    A configured robot's teleoperator becomes a leader, because that is what
-    the pairing in an environment means.
+    A configured robot's teleoperator becomes a leader: that is the pairing.
     """
     robots: list[ReadableRobot] = []
     leaders: list[ReadableRobot] = []
