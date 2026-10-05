@@ -20,26 +20,26 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from runtimev2.environment import describe_environment
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, image_feature_key, joint_feature_key
+from runtimev2.control.teleop import check_pairing
+from runtimev2.features import image_feature_key
 from runtimev2.store import FeatureStore
 from runtimev2.workers.base import ThreadedWorker
 from runtimev2.workers.camera import CameraWorker
 from runtimev2.workers.robot import RobotWorker
-from runtimev2.workers.teleop import TeleopSource, joint_mapping
 from workers.base import ManagedLifecycle
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, Mapping
 
     from robots.robot_client_factory import RobotClientFactory
     from runtimev2.environment import CameraShape, RobotShape, SessionShape
+    from runtimev2.leader import LeaderDevice
     from schemas.environment import EnvironmentWithRelations
     from schemas.project_camera import Camera as CameraRow
     from schemas.robot import ReadableRobot
 
-# A leader is read as fast as it will answer, which is what makes teleoperation
-# feel direct. A follower is written at the same rate it is read.
+# A follower is commanded as often as it can be, because that is what makes a
+# slow control's ramp smooth rather than stepped.
 DEFAULT_ROBOT_HZ = 100.0
 
 
@@ -51,7 +51,8 @@ class EnvironmentState:
     robots: dict[str, str] = field(default_factory=dict)
     """Robot key to role."""
     cameras: tuple[str, ...] = ()
-    teleoperating: bool = False
+    leaders: tuple[str, ...] = ()
+    """Input devices. Separate from ``robots`` because nothing commands them."""
     features: int = 0
 
 
@@ -65,17 +66,25 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         self,
         environment: EnvironmentWithRelations,
         factory: RobotClientFactory,
+        shape: SessionShape,
+        leaders: Mapping[str, LeaderDevice],
         *,
         robot_hz: float = DEFAULT_ROBOT_HZ,
     ) -> None:
+        """``shape`` and ``leaders`` are the session's, borrowed for this load.
+
+        Neither is owned here: the shape is what datasets and models are
+        checked against, and a leader outlasts any one environment.
+        """
         self._environment = environment
         self._factory = factory
         self._robot_hz = robot_hz
-        self._shape: SessionShape | None = None
+        self._shape: SessionShape | None = shape
+        self._leaders = leaders
         self._store: FeatureStore | None = None
         self._robots: dict[str, RobotWorker] = {}
         self._cameras: dict[str, CameraWorker] = {}
-        self._teleop: TeleopSource | None = None
+
         # Workers that come and go while the devices stay connected -- a
         # dataset or a model is chosen above the environment and can be swapped
         # without dropping the arms. Each keeps its own teardown so it can be
@@ -110,7 +119,8 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
 
     @property
     def has_leader(self) -> bool:
-        return self._teleop is not None
+        """Whether a leader arm is present to teleoperate from."""
+        return bool(self._leaders)
 
     def state(self) -> EnvironmentState:
         """Summarize this environment for a client."""
@@ -118,29 +128,12 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
             environment=self._environment.name,
             robots={robot.key: robot.role for robot in self.shape.robots},
             cameras=tuple(self._cameras),
-            teleoperating=any(worker.write_actions for worker in self._robots.values()),
+            leaders=tuple(self._leaders),
             features=len(self.store.spec.features),
         )
 
-    def set_teleoperating(self, enabled: bool) -> None:
-        """Let the followers follow, or stop them.
-
-        Only the write side is switched. The leader keeps being read and the
-        mapping keeps publishing either way, so a client can watch what would
-        be commanded before committing to it -- and enabling is then one flag
-        rather than a sequence that has to be started in the right order.
-
-        Raises:
-            RuntimeError: This environment has no leader.
-        """
-        if self._teleop is None:
-            raise RuntimeError("This environment has no leader to teleoperate from")
-        for robot in self.shape.followers:
-            self._robots[robot.key].write_actions = enabled
-        logger.info("Teleoperation {} for {}", "enabled" if enabled else "disabled", self._environment.name)
-
     @asynccontextmanager
-    async def lifecycle(self) -> AsyncIterator[LoadedEnvironment]:
+    async def lifecycle(self) -> AsyncGenerator[LoadedEnvironment]:
         """Build the store, then enter every worker.
 
         Each worker acquires its own device and starts its own thread, so the
@@ -149,28 +142,31 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         before releasing what it holds.
         """
         async with AsyncExitStack() as stack:
-            self._shape = await describe_environment(self._environment, self._factory)
-            self._store = FeatureStore(self._shape.feature_spec())
+            self._store = FeatureStore(self.shape.feature_spec())
             logger.info(
-                "Loading {} with {} robots, {} cameras and {} features",
+                "Loading {} with {} robots, {} leaders, {} cameras and {} features",
                 self._environment.name,
-                len(self._shape.robots),
-                len(self._shape.cameras),
+                len(self.shape.robots),
+                len(self.shape.leaders),
+                len(self.shape.cameras),
                 len(self._store.spec.features),
             )
             try:
-                for shape in self._shape.robots:
+                for shape in self.shape.robots:
                     robot_worker = await self._robot_worker(shape)
                     await stack.enter_async_context(robot_worker)
                     self._robots[shape.key] = robot_worker
-                for camera in self._shape.cameras:
+                for camera in self.shape.cameras:
                     camera_worker = self._camera_worker(camera)
                     await stack.enter_async_context(camera_worker)
                     self._cameras[camera.key] = camera_worker
-                teleop = self._build_teleop()
-                if teleop is not None:
-                    await stack.enter_async_context(teleop)
-                    self._teleop = teleop
+                # Nothing controls a freshly loaded environment: the arms
+                # publish what they measure and hold position until a client
+                # says what should drive them, so loading never starts motion.
+                # The pairing is still checked now rather than when teleop is
+                # first selected, because an unpairable leader is a broken
+                # environment and should say so on load.
+                self.pair_for_teleop()
                 yield self
             finally:
                 # Detached first: an attached worker was entered on its own
@@ -181,7 +177,6 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
                 # mid-unload is not handed workers on their way out.
                 self._robots.clear()
                 self._cameras.clear()
-                self._teleop = None
         logger.info("Unloaded {}", self._environment.name)
 
     async def attach(self, key: str, worker: ThreadedWorker) -> None:
@@ -218,10 +213,13 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
     async def _robot_worker(self, shape: RobotShape) -> RobotWorker:
         """Build an unconnected robot worker for ``shape``.
 
-        The robot itself is built here because that is async and needs the
-        factory; connecting it is the worker's own business.
+        A plain driver rather than a ``SharedRobot``: this worker is the only
+        thing touching the arm while loaded, so an owner process would buy
+        nothing and cost a zenoh hop on the 100Hz path. The session holds the
+        port outright, which is what we want -- an arm being driven is not
+        something a second caller should join.
         """
-        robot, _definition = await self._factory.build_shared_robot(self._row_for(shape))
+        robot, _definition = await self._factory.build_robot_driver(self._row_for(shape), self._factory)
         return RobotWorker(robot, self.store, shape=shape, hz=self._robot_hz)
 
     def _camera_worker(self, shape: CameraShape) -> CameraWorker:
@@ -266,30 +264,28 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
                 return candidate
         raise RuntimeError(f"Camera {shape.key} is not part of {self._environment.name}")
 
-    def _build_teleop(self) -> TeleopSource | None:
-        """Map each leader's observations onto a follower's actions.
+    def pair_for_teleop(self) -> tuple[LeaderDevice, RobotShape] | None:
+        """The leader and follower teleoperation would use, if there are any.
 
-        Returns ``None`` when the environment has no leader, which is a normal
-        environment rather than a problem -- one with no control source still
-        publishes observations.
+        ``None`` when there is no leader, which is a normal environment.
 
         Raises:
-            RuntimeError: Several leaders or followers, which the environment
-                does not say how to pair.
+            RuntimeError: Several of either -- the environment does not say
+                which drives which -- or joint counts that cannot correspond.
         """
-        leaders = [robot for robot in self.shape.robots if robot.role == "leader"]
-        followers = self.shape.followers
-        if not leaders or not followers:
+        followers = self.shape.robots
+        if not self._leaders or not followers:
             return None
-        if len(leaders) != 1 or len(followers) != 1:
+        if len(self._leaders) != 1 or len(followers) != 1:
             raise RuntimeError(
-                f"cannot pair {len(leaders)} leaders with {len(followers)} followers; "
+                f"cannot pair {len(self._leaders)} leaders with {len(followers)} followers; "
                 "the environment does not say which drives which"
             )
-        leader, follower = leaders[0], followers[0]
-        mapping = joint_mapping(
-            tuple(joint_feature_key(OBSERVATION_PREFIX, leader.key, joint) for joint in leader.joint_names),
-            tuple(joint_feature_key(ACTION_PREFIX, follower.key, joint) for joint in follower.joint_names),
-        )
-        # At the robots' rate: a command is only as fresh as the leader it came from.
-        return TeleopSource(self.store, mapping, hz=self._robot_hz)
+        leader = next(iter(self._leaders.values()))
+        follower = followers[0]
+        check_pairing(leader.joint_names, follower.joint_names)
+        return leader, follower
+
+    def action_keys_for(self, shape: RobotShape) -> tuple[str, ...]:
+        """The action features a control would write to drive ``shape``."""
+        return self._robots[shape.key].action_keys

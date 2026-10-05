@@ -51,7 +51,7 @@ class DatasetWorker(ThreadedWorker):
         super().__init__(name=name, hz=hz)
         self._store = store
         self._recording = recording
-        follower = shape.followers[0]
+        follower = shape.robots[0]
         # Resolved once: store key -> dataset key, for both halves of a row.
         self._observations = {
             joint_feature_key(OBSERVATION_PREFIX, follower.key, joint): f"{joint}.pos" for joint in follower.joint_names

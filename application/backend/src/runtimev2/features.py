@@ -71,18 +71,26 @@ def image_feature_key(camera: str) -> str:
 
 
 def robot_features(robot: str, joint_names: Sequence[str]) -> list[Feature]:
-    """Return the observation and action features for one robot.
+    """Return the observation and action features for a robot we drive.
 
-    Both kinds are emitted for every joint. A robot that is only ever read
-    still gets action features: whether they are written to hardware is the
-    worker's business, not the shape's, and leaving them out would mean the
-    shape changed when a robot started being driven.
+    Both kinds per joint: whether a command actually reaches the hardware is
+    the worker's business, not the shape's, so the shape does not change when
+    driving is enabled.
     """
     features: list[Feature] = []
     for joint in joint_names:
         features.append(Feature(joint_feature_key(OBSERVATION_PREFIX, robot, joint), "observation"))
         features.append(Feature(joint_feature_key(ACTION_PREFIX, robot, joint), "action"))
     return features
+
+
+def leader_features(robot: str, joint_names: Sequence[str]) -> list[Feature]:
+    """Return the observation features for a robot we only read.
+
+    No action features. A leader is an input device -- nothing commands it --
+    so action slots for one would be keys that can never be written.
+    """
+    return [Feature(joint_feature_key(OBSERVATION_PREFIX, robot, joint), "observation") for joint in joint_names]
 
 
 def camera_features(cameras: dict[str, tuple[int, int, int]]) -> list[Feature]:

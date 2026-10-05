@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from runtimev2.features import FeatureSpec, camera_features, robot_features, sanitize_name
+from runtimev2.features import FeatureSpec, camera_features, leader_features, robot_features, sanitize_name
 
 # Only reached when a camera row has no fps recorded; the usual case is that it
 # does, because the UI makes you pick a format.
@@ -65,6 +65,15 @@ class RobotShape:
 
 
 @dataclass(frozen=True, slots=True)
+class LeaderShape:
+    """One leader arm: read for its position, never commanded."""
+
+    key: str
+    robot_id: str
+    joint_names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CameraShape:
     """One camera in an environment, at the resolution its row declares."""
 
@@ -91,18 +100,18 @@ class SessionShape:
     """
 
     robots: tuple[RobotShape, ...]
+    """The robots this session drives."""
     cameras: tuple[CameraShape, ...]
+    leaders: tuple[LeaderShape, ...] = ()
+    """Input devices, kept separate because nothing commands them."""
 
     def feature_spec(self) -> FeatureSpec:
         """Project this shape onto the session's feature keys."""
         return FeatureSpec.build(
             *(robot_features(robot.key, robot.joint_names) for robot in self.robots),
+            *(leader_features(leader.key, leader.joint_names) for leader in self.leaders),
             camera_features({camera.key: camera.shape for camera in self.cameras}),
         )
-
-    @property
-    def followers(self) -> tuple[RobotShape, ...]:
-        return tuple(robot for robot in self.robots if robot.role == "follower")
 
 
 def _camera_shape(camera: Camera) -> tuple[int, int, int]:
@@ -149,11 +158,12 @@ async def describe_environment(
     """
     port_finder = _StoredPortFinder(factory)
     robots: list[RobotShape] = []
+    leaders: list[LeaderShape] = []
     for configured in environment.robots:
         robots.append(await _describe_robot(configured.robot, factory, port_finder))
         teleoperator = getattr(configured.tele_operator, "robot", None)
         if teleoperator is not None:
-            robots.append(await _describe_robot(teleoperator, factory, port_finder))
+            leaders.append(await _describe_leader(teleoperator, factory, port_finder))
 
     cameras = [
         CameraShape(
@@ -166,8 +176,22 @@ async def describe_environment(
         for camera in environment.cameras
     ]
 
-    _reject_key_collisions(robots, cameras)
-    return SessionShape(robots=tuple(robots), cameras=tuple(cameras))
+    _reject_key_collisions(robots, leaders, cameras)
+    return SessionShape(robots=tuple(robots), cameras=tuple(cameras), leaders=tuple(leaders))
+
+
+async def _describe_leader(
+    robot: ReadableRobot,
+    factory: RobotClientFactory,
+    port_finder: _StoredPortFinder,
+) -> LeaderShape:
+    """Describe a leader, which contributes observations and nothing else."""
+    driver, _definition = await factory.build_robot_driver(robot, port_finder)
+    return LeaderShape(
+        key=sanitize_name(robot.name),
+        robot_id=str(robot.id),
+        joint_names=tuple(str(name) for name in driver.joint_names),
+    )
 
 
 async def _describe_robot(
@@ -187,13 +211,18 @@ async def _describe_robot(
     )
 
 
-def _reject_key_collisions(robots: list[RobotShape], cameras: list[CameraShape]) -> None:
+def _reject_key_collisions(robots: list[RobotShape], leaders: list[LeaderShape], cameras: list[CameraShape]) -> None:
     """Fail loudly when two devices sanitize to the same feature key.
 
     Silently merging them would put two robots' joints under one name, and the
     only symptom would be a recording where half the columns move together.
     """
-    for label, keys in (("Robot", [robot.key for robot in robots]), ("Camera", [camera.key for camera in cameras])):
+    for label, keys in (
+        # Robots and leaders share the observation namespace, so they collide
+        # with each other as readily as two robots would.
+        ("Robot", [robot.key for robot in robots] + [leader.key for leader in leaders]),
+        ("Camera", [camera.key for camera in cameras]),
+    ):
         seen: set[str] = set()
         for key in keys:
             if key in seen:

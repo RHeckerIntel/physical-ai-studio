@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import numpy as np
 import pytest
 
+from runtimev2.control.config import ModelControlConfig, TeleopControlConfig
+from runtimev2.control.teleop import JointMappingError
+from runtimev2.features import ACTION_PREFIX, joint_feature_key
 from runtimev2.session import RuntimeSession
 
 if TYPE_CHECKING:
@@ -32,7 +36,7 @@ class _Observation:
 
 
 @dataclass
-class _SharedRobot:
+class _Driver:
     """Stands in for a connected SharedRobot, including its connect-gated joints."""
 
     label: str
@@ -40,13 +44,13 @@ class _SharedRobot:
     position: float = 0.0
     connected: bool = False
     disconnects: int = 0
+    reads: int = 0
     sent: list[np.ndarray] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
     def joint_names(self) -> list[str]:
-        if not self.connected:
-            raise RuntimeError("SharedRobot is not connected. Call connect() first.")
+        # Readable unconnected: the describe step derives a shape that way.
         return list(self.reported_joints)
 
     def connect(self) -> None:
@@ -58,9 +62,13 @@ class _SharedRobot:
 
     def get_observation(self) -> _Observation:
         with self.lock:
+            self.reads += 1
             return _Observation(
                 joint_positions=np.full(len(self.reported_joints), self.position, dtype=np.float32),
-                timestamp=100.0 + self.position,
+                # Advances with reads, as a 100Hz device's clock would. Tying it
+                # to position instead would make a still arm look frozen in time,
+                # and the gap between readings is what sets a ramp's duration.
+                timestamp=100.0 + self.reads * 0.01,
             )
 
     def send_action(self, action: np.ndarray, **_: Any) -> None:
@@ -103,17 +111,14 @@ class _Definition:
 class _Factory:
     roles: dict[str, str] = field(default_factory=dict)
     joints: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    robots: dict[str, _SharedRobot] = field(default_factory=dict)
+    robots: dict[str, _Driver] = field(default_factory=dict)
+    """The driver most recently built per robot -- the one a worker holds."""
 
     async def build_robot_driver(self, robot: _Row, port_finder: object) -> tuple[Any, _Definition]:
-        driver = _SharedRobot(robot.name, connected=True)  # a local driver needs no connection
-        driver.reported_joints = self.joints.get(robot.name, JOINTS)
+        """Called twice per robot: once to describe, once to load."""
+        driver = _Driver(robot.name, reported_joints=self.joints.get(robot.name, JOINTS))
+        self.robots[robot.name] = driver
         return driver, _Definition(role=self.roles.get(robot.name, "follower"))
-
-    async def build_shared_robot(self, robot: _Row) -> tuple[_SharedRobot, _Definition]:
-        shared = _SharedRobot(robot.name, reported_joints=self.joints.get(robot.name, JOINTS))
-        self.robots[robot.name] = shared
-        return shared, _Definition(role=self.roles.get(robot.name, "follower"))
 
     async def find_port(self, port_info: object) -> str | None:
         return None
@@ -124,6 +129,11 @@ def _teleop_env() -> tuple[_Environment, _Factory]:
         robots=[_Configured(robot=_Row("follower"), tele_operator=_Teleoperator(robot=_Row("leader")))]
     )
     return environment, _Factory(roles={"follower": "follower", "leader": "leader"})
+
+
+def _follower_only_env() -> tuple[_Environment, _Factory]:
+    """An environment with nothing to teleoperate from, which is a normal one."""
+    return _Environment(robots=[_Configured(robot=_Row("follower"))]), _Factory(roles={"follower": "follower"})
 
 
 async def _settle() -> None:
@@ -193,7 +203,7 @@ class TestLoading:
         environment, factory = _teleop_env()
         factory.joints = {"follower": JOINTS, "leader": ("only_one",)}
 
-        with pytest.raises(ValueError, match="same number of joints"):
+        with pytest.raises(JointMappingError, match="cannot drive"):
             async with RuntimeSession(factory) as session:
                 await session.load(environment)
 
@@ -212,7 +222,7 @@ class TestLoading:
             await session.load(good)
             factory.joints = {"odd": ("only_one",)}
 
-            with pytest.raises(ValueError, match="same number of joints"):
+            with pytest.raises(JointMappingError, match="cannot drive"):
                 await session.load(broken)
 
             assert session.environment is None
@@ -349,3 +359,311 @@ class TestRecordingCommands:
 
             assert dataset[0].discarded == 1
             assert session.state().episodes_recorded == 0
+
+
+@pytest.fixture
+def policy(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Load policies without reading an export or touching an accelerator."""
+    from runtimev2.inference import LoadedModel
+
+    loaded: list[Any] = []
+
+    def load_model(model_id: Any, path: Any, shape: Any, *, device: str) -> tuple[Any, Any]:
+        tasks: list[Any] = []
+
+        def select_action(observation: dict[str, Any]) -> np.ndarray:
+            tasks.append(observation.get("task"))
+            return np.zeros(len(JOINTS), dtype=np.float32)
+
+        model = SimpleNamespace(
+            reset=lambda: None,
+            select_action=select_action,
+            adapter=SimpleNamespace(input_names=[]),
+            chunk_size=20,
+            tasks=tasks,
+        )
+        loaded.append(model)
+        return LoadedModel(model_id=model_id, export_dir=path, chunk_size=20), model
+
+    monkeypatch.setattr("runtimev2.session.load_model", load_model)
+    return loaded
+
+
+class TestPolicyAboveEnvironment:
+    async def test_a_policy_survives_an_environment_reload(self, policy: list[Any], tmp_path: Path) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.load_policy(uuid4(), tmp_path, device="cpu")
+            assert session.state().model_loaded
+
+            await session.load(environment)
+
+            assert session.state().model_loaded, "the swap dropped the policy"
+            assert len(policy) == 2, "it was not reloaded against the new shape"
+
+    async def test_a_policy_can_be_chosen_before_an_environment(self, policy: list[Any], tmp_path: Path) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load_policy(uuid4(), tmp_path, device="cpu")
+            assert not session.state().model_loaded
+
+            await session.load(environment)
+
+            assert session.state().model_loaded
+            assert len(policy) == 1
+
+    async def test_loading_a_policy_does_not_select_it(self, policy: list[Any], tmp_path: Path) -> None:
+        """Selecting a control is what starts motion, so loading must not."""
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            resting = factory.robots["follower"].position
+            await session.load_policy(uuid4(), tmp_path, device="cpu")
+            await _settle()
+
+            assert session.state().control is None
+            for command in factory.robots["follower"].sent:
+                np.testing.assert_allclose(command, [resting] * len(JOINTS))
+
+    async def test_a_policy_writes_action_features(self, policy: list[Any], tmp_path: Path) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.load_policy(uuid4(), tmp_path, device="cpu")
+            await _settle()
+            action = session.require_environment().store.read(joint_feature_key(ACTION_PREFIX, "follower", "gripper"))
+
+        assert action is not None
+
+    async def test_the_task_reaches_a_running_policy(self, policy: list[Any], tmp_path: Path) -> None:
+        """One string conditions the policy and labels the recording."""
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.load_policy(uuid4(), tmp_path, device="cpu")
+            await session.select_control(ModelControlConfig())
+            session.set_task("pick up the cube")
+            await _settle()
+
+            assert policy[0].tasks, "the policy never inferred"
+            assert policy[0].tasks[-1] == ["pick up the cube"]
+
+    async def test_unloading_a_policy_leaves_the_environment(self, policy: list[Any], tmp_path: Path) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.load_policy(uuid4(), tmp_path, device="cpu")
+            await session.unload_policy()
+
+            assert not session.state().model_loaded
+            assert session.state().loaded
+
+
+class TestOnlyOneThingDrives:
+    """A human and a policy fighting over the same joints is not a reachable state."""
+
+    async def test_selecting_a_policy_displaces_teleoperation(self, policy: list[Any], tmp_path: Path) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.select_control(TeleopControlConfig())
+            assert session.state().control == TeleopControlConfig()
+
+            await session.load_policy(uuid4(), tmp_path, device="cpu")
+            await session.select_control(ModelControlConfig())
+
+            assert isinstance(session.state().control, ModelControlConfig)
+
+    async def test_unloading_a_policy_leaves_nothing_controlling(self, policy: list[Any], tmp_path: Path) -> None:
+        """Rather than guessing at teleoperation; the follower holds position."""
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.select_control(TeleopControlConfig())
+            await session.load_policy(uuid4(), tmp_path, device="cpu")
+            await session.select_control(ModelControlConfig())
+            await session.unload_policy()
+
+            assert session.state().control is None
+
+    async def test_unloading_a_policy_leaves_another_control_alone(self, policy: list[Any], tmp_path: Path) -> None:
+        """Unloading one that was never selected must not clear the control."""
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.select_control(TeleopControlConfig())
+
+            await session.unload_policy()
+
+            assert session.state().control == TeleopControlConfig()
+
+
+class TestImageConversion:
+    """Cameras publish (H, W, 3) uint8; vision policies take channels-first float."""
+
+    def test_a_model_declaring_no_preprocessing_is_given_the_conversion(self) -> None:
+        """Existing exports declare none, and fail on their first frame without it."""
+        from runtimev2.inference import _ensure_image_conversion
+
+        model = SimpleNamespace(preprocessors=[])
+
+        _ensure_image_conversion(model)  # type: ignore[arg-type]
+
+        assert len(model.preprocessors) == 1
+
+    def test_a_models_own_pipeline_is_left_alone(self) -> None:
+        """A policy with specific preprocessing would otherwise lose it."""
+        from runtimev2.inference import _ensure_image_conversion
+
+        declared = object()
+        model = SimpleNamespace(preprocessors=[declared])
+
+        _ensure_image_conversion(model)  # type: ignore[arg-type]
+
+        assert model.preprocessors == [declared]
+
+
+class TestSelectingAControl:
+    """The session chooses; the environment runs what it is given."""
+
+    async def test_a_session_starts_with_nothing_selected(self) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+
+            assert session.state().control is None
+
+    async def test_teleop_is_selected_by_name(self) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.select_control(TeleopControlConfig())
+
+            assert session.state().control == TeleopControlConfig()
+
+    async def test_teleop_is_selected_with_its_own_rate(self) -> None:
+        """The rate is part of the choice, and comes back in state."""
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.select_control(TeleopControlConfig(hz=50.0))
+
+            assert session.state().control == TeleopControlConfig(hz=50.0)
+
+    async def test_teleop_without_a_leader_is_refused(self) -> None:
+        environment, factory = _follower_only_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+
+            with pytest.raises(RuntimeError, match="no leader"):
+                await session.select_control(TeleopControlConfig())
+
+    async def test_a_choice_survives_an_environment_reload(self) -> None:
+        """It is rebuilt against the new store, like a dataset worker."""
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.select_control(TeleopControlConfig())
+
+            await session.load(environment)
+
+            assert session.state().control == TeleopControlConfig()
+
+    async def test_a_choice_made_before_loading_is_applied_on_load(self) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.select_control(TeleopControlConfig())
+            assert session.state().environment is None
+
+            await session.load(environment)
+
+            assert session.state().control == TeleopControlConfig()
+
+    async def test_selecting_nothing_releases_the_control(self) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            await session.select_control(TeleopControlConfig())
+
+            await session.select_control(None)
+
+            assert session.state().control is None
+            assert session.state().loaded, "the environment should stay loaded"
+
+    async def test_selecting_a_model_without_one_loaded_is_refused(self) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+
+            with pytest.raises(RuntimeError, match="No model is loaded"):
+                await session.select_control(ModelControlConfig())
+
+
+class TestSelectingAControlIsEnoughToDrive:
+    """There is no second switch: an arm follows its action features always."""
+
+    async def test_selecting_a_control_moves_the_follower(self) -> None:
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            factory.robots["leader"].position = 1.5
+            await _settle()
+            assert session.state().control is None
+
+            await session.select_control(TeleopControlConfig(hz=200.0))
+            await _settle()
+
+        sent = factory.robots["follower"].sent
+        assert sent, "the follower was never commanded"
+        np.testing.assert_allclose(sent[-1], [1.5, 1.5])
+
+    async def test_before_a_control_the_follower_only_holds(self) -> None:
+        """It is commanded, but only to where it already was."""
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            resting = factory.robots["follower"].position
+            factory.robots["leader"].position = 1.5
+            await _settle()
+
+        for command in factory.robots["follower"].sent:
+            np.testing.assert_allclose(command, [resting] * len(JOINTS))
+
+    async def test_releasing_the_control_leaves_the_arm_where_it_was(self) -> None:
+        """Nothing writes the action any more, so the arm holds its last command."""
+        environment, factory = _teleop_env()
+
+        async with RuntimeSession(factory) as session:
+            await session.load(environment)
+            factory.robots["leader"].position = 1.5
+            await session.select_control(TeleopControlConfig(hz=200.0))
+            await _settle()
+
+            await session.select_control(None)
+            await _settle()
+            after_release = len(factory.robots["follower"].sent)
+            await _settle()
+
+            # Still commanded -- it follows always -- but always the same value.
+            assert len(factory.robots["follower"].sent) > after_release
+            np.testing.assert_allclose(factory.robots["follower"].sent[-1], [1.5, 1.5])

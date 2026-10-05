@@ -1,4 +1,4 @@
-import { Divider, Flex, Heading, StatusLight, Switch, Text, View, Well } from '@geti-ui/ui';
+import { Divider, Flex, Heading, Item, Picker, StatusLight, Text, View, Well } from '@geti-ui/ui';
 
 import { useEnvironmentId } from '../../features/robots/use-environment';
 import { FeatureGroup, useRuntimeV2Session } from '../../features/robots/use-runtimev2-session';
@@ -68,15 +68,19 @@ const JointTable = ({ group }: { group: FeatureGroup }) => (
 /**
  * A deliberately plain screen for trying the new runtime against real arms.
  *
- * Only teleoperation is wired up. The session lives as long as this page is
- * mounted -- the robots connect on arrival and are released on leaving -- so
- * navigating away is how it ends.
+ * The session lives as long as this page is mounted -- the robots connect on
+ * arrival and are released on leaving -- so navigating away is how it ends.
+ * Picking a control is what sets the arms moving; there is nothing else to
+ * enable.
  */
 export const EnvironmentTeleop = () => {
     const { project_id, environment_id } = useEnvironmentId();
-    const { state, grouped, error, isConnecting, setTeleoperating } = useRuntimeV2Session(project_id, environment_id);
+    const { state, grouped, error, isConnecting, setControl } = useRuntimeV2Session(project_id, environment_id);
 
-    const hasLeader = state?.loaded === true && Object.values(state.robots).includes('leader');
+    const hasLeader = (state?.leaders.length ?? 0) > 0;
+    // Exactly one thing decides the followers' commands, and choosing it is
+    // what starts them moving -- there is no second switch.
+    const control = state?.control?.kind ?? null;
 
     return (
         <View padding='size-300' overflow='auto' height='100%'>
@@ -89,13 +93,24 @@ export const EnvironmentTeleop = () => {
             />
 
             <View marginTop='size-300' marginBottom='size-300'>
-                <Switch isSelected={state?.teleoperating ?? false} isDisabled={!hasLeader} onChange={setTeleoperating}>
-                    Follow the leader
-                </Switch>
+                <Picker
+                    label='Control'
+                    selectedKey={control ?? 'none'}
+                    isDisabled={!hasLeader}
+                    onSelectionChange={(key) => setControl(key === 'none' ? null : String(key))}
+                >
+                    <Item key='none'>Nothing</Item>
+                    <Item key='teleop'>Leader arm</Item>
+                    <Item key='model'>Policy</Item>
+                </Picker>
                 <Text>
-                    {hasLeader
-                        ? 'The follower moves to the leader’s position while this is on.'
-                        : 'This environment has no leader to teleoperate from.'}
+                    {control === null
+                        ? hasLeader
+                            ? 'The arms hold where they are. Pick a control to decide their commands.'
+                            : 'This environment has no leader to teleoperate from.'
+                        : control === 'model'
+                          ? 'A policy is deciding the commands, and the follower is following them.'
+                          : 'The follower is following the leader’s position.'}
                 </Text>
             </View>
 

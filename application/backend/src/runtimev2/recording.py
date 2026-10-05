@@ -130,7 +130,7 @@ def open_for_recording(
         ValueError: The session has no single follower to record.
     """
     check_compatible(dataset_id, path, shape)
-    followers = shape.followers
+    followers = shape.robots
     if len(followers) != 1:
         raise ValueError(f"recording needs exactly one follower, found {len(followers)}")
     follower = followers[0]

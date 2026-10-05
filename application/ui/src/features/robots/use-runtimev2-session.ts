@@ -16,8 +16,11 @@ export interface RuntimeV2State {
     environment: string | null;
     robots: Record<string, string>;
     cameras: string[];
-    teleoperating: boolean;
+    /** Input devices. Separate from robots because nothing commands them. */
+    leaders: string[];
     features: number;
+    /** What drives the arms, rate included, if anything does. */
+    control: { kind: string; hz: number } | null;
 }
 
 export type ParsedRuntimeV2Message =
@@ -119,9 +122,12 @@ export const useRuntimeV2Session = (project_id: string, environment_id: string) 
         retryOnError: false,
     });
 
-    const setTeleoperating = useCallback(
-        (enabled: boolean) => {
-            sendJsonMessage({ event: 'set_teleoperating', enabled });
+    /** Choose what drives the followers, optionally at a given rate. Null
+     * leaves them uncontrolled. */
+    const setControl = useCallback(
+        (kind: string | null, hz?: number) => {
+            const control = kind === null ? null : hz === undefined ? kind : { kind, hz };
+            sendJsonMessage({ event: 'set_control', control });
         },
         [sendJsonMessage]
     );
@@ -146,7 +152,7 @@ export const useRuntimeV2Session = (project_id: string, environment_id: string) 
         error,
         isConnecting: (state === null || !state.loaded) && error === null,
         isOpen: readyState === 1,
-        setTeleoperating,
+        setControl,
         loadEnvironment,
         unloadEnvironment,
     };

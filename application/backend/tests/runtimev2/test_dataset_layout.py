@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from runtimev2.dataset_layout import ACTION_KEY, STATE_KEY, DatasetLayout, LayoutEntry
-from runtimev2.environment import CameraShape, RobotShape, SessionShape
+from runtimev2.environment import CameraShape, LeaderShape, RobotShape, SessionShape
 
 JOINTS = ("shoulder_pan", "elbow_flex", "gripper")
 PACKED = ("shoulder_pan.pos", "elbow_flex.pos", "gripper.pos")
@@ -16,12 +16,11 @@ def _shape(*, followers: int = 1, leader: bool = False, cameras: bool = True) ->
         RobotShape(key=f"follower{index or ''}", robot_id=f"r{index}", role="follower", joint_names=JOINTS)
         for index in range(followers)
     ]
-    if leader:
-        robots.append(RobotShape(key="leader", robot_id="rl", role="leader", joint_names=JOINTS))
+    leaders = [LeaderShape(key="leader", robot_id="rl", joint_names=JOINTS)] if leader else []
     camera_shapes = (
         [CameraShape(key="overhead", name="overhead", camera_id="c0", shape=(480, 640, 3), fps=30.0)] if cameras else []
     )
-    return SessionShape(robots=tuple(robots), cameras=tuple(camera_shapes))
+    return SessionShape(robots=tuple(robots), cameras=tuple(camera_shapes), leaders=tuple(leaders))
 
 
 class TestProjection:

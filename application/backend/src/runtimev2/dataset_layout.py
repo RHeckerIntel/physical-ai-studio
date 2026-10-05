@@ -73,7 +73,7 @@ class DatasetLayout:
         Raises:
             ValueError: The environment has no follower, or more than one.
         """
-        followers = shape.followers
+        followers = shape.robots
         if len(followers) != 1:
             raise ValueError(
                 f"a recording needs exactly one follower, found {len(followers)}; "

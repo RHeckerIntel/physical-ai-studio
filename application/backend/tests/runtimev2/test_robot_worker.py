@@ -1,4 +1,4 @@
-"""A robot worker publishes what it measures and drives what the store tells it to."""
+"""A robot worker publishes what it measures and commands what its control says."""
 
 from __future__ import annotations
 
@@ -70,19 +70,44 @@ class _FakeRobot:
 SHAPE = RobotShape(key="follower", robot_id="r0", role="follower", joint_names=tuple(JOINTS))
 
 
-def _setup(*, write_actions: bool = False) -> tuple[_FakeRobot, FeatureStore, RobotWorker]:
+class _Clock:
+    """A clock a test steps by hand, so a ramp is not timing-dependent."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _setup(*, clock: _Clock | None = None, seed: bool = True) -> tuple[_FakeRobot, FeatureStore, RobotWorker]:
+    """A connected worker, seeded as ``acquire`` would unless ``seed`` is off.
+
+    These tests drive ticks directly rather than through the worker's thread.
+    """
     robot = _FakeRobot()
     store = FeatureStore(FeatureSpec.build(robot_features("follower", JOINTS)))
-    worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0, write_actions=write_actions)
-    # ``tick`` needs the robot connected; these tests drive ticks directly
-    # rather than through the worker's own thread.
+    worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0, clock=clock or _Clock())
     robot.connect()
     worker._connected = True
+    if seed:
+        worker._hold_current_position()
     return robot, store, worker
 
 
 def _action_key(joint: str) -> str:
     return joint_feature_key(ACTION_PREFIX, "follower", joint)
+
+
+def _write_action(store: FeatureStore, values: list[float], timestamp: float) -> None:
+    """Write what a control would, without running one."""
+    store.write_many(
+        {_action_key(joint): value for joint, value in zip(JOINTS, values, strict=True)},
+        timestamp=timestamp,
+    )
 
 
 class TestObservation:
@@ -107,64 +132,153 @@ class TestObservation:
         assert sample.timestamp == 1234.5
 
 
-class TestDriving:
-    def test_nothing_is_sent_when_writing_is_disabled(self) -> None:
-        robot, store, worker = _setup(write_actions=False)
-        for joint in JOINTS:
-            store.write(_action_key(joint), 1.0, timestamp=1.0)
+class TestHoldingOnConnect:
+    """An arm follows its action features always, so they start where it is."""
+
+    def test_connecting_seeds_the_action_with_the_measured_position(self) -> None:
+        robot, store, _worker = _setup()
+
+        for joint, position in zip(JOINTS, robot.positions, strict=True):
+            assert store.read(_action_key(joint)).value == pytest.approx(float(position))
+
+    def test_the_first_command_is_where_the_arm_already_is(self) -> None:
+        """Which is what makes loading safe with no switch to forget."""
+        robot, _store, worker = _setup()
+
+        worker.tick()
+
+        np.testing.assert_allclose(robot.sent[0], robot.positions)
+
+    def test_it_keeps_holding_while_nothing_writes(self) -> None:
+        robot, _store, worker = _setup()
+
+        for _ in range(5):
+            worker.tick()
+
+        assert len(robot.sent) == 5
+        for sent in robot.sent:
+            np.testing.assert_allclose(sent, robot.positions)
+
+    def test_nothing_is_sent_before_an_action_exists(self) -> None:
+        """A worker ticked without acquiring has nothing to follow."""
+        robot, _store, worker = _setup(seed=False)
 
         worker.tick()
 
         assert robot.sent == []
 
-    def test_an_authored_action_is_sent_in_joint_order(self) -> None:
-        """``send_action`` takes a vector, so the order must track joint_names, not the store's sorting."""
-        robot, store, worker = _setup(write_actions=True)
-        for value, joint in enumerate(JOINTS, start=1):
-            store.write(_action_key(joint), float(value), timestamp=1.0)
-
-        worker.tick()
-
-        assert len(robot.sent) == 1
-        np.testing.assert_allclose(robot.sent[0], [1.0, 2.0, 3.0])
-
-    def test_a_partially_authored_action_is_not_sent(self) -> None:
-        """There is no safe filler for an unauthored joint; holding still is the caller's job."""
-        robot, store, worker = _setup(write_actions=True)
+    def test_a_partially_written_action_is_not_sent(self) -> None:
+        """There is no safe filler for a joint nothing has spoken for."""
+        robot, store, worker = _setup(seed=False)
         store.write(_action_key("shoulder_pan"), 1.0, timestamp=1.0)
 
         worker.tick()
 
         assert robot.sent == []
 
-    def test_disjoint_sources_compose_without_coordination(self) -> None:
-        """A keyboard driving one joint and a leader driving the rest need not know about each other."""
-        robot, store, worker = _setup(write_actions=True)
-        store.write(_action_key("gripper"), 9.0, timestamp=1.0)  # "keyboard"
-        for joint in ("shoulder_pan", "elbow_flex"):  # "leader"
-            store.write(_action_key(joint), 5.0, timestamp=1.0)
+
+class TestDriving:
+    def test_the_action_is_sent_in_joint_order(self) -> None:
+        """``send_action`` takes a vector, so the order must track joint_names."""
+        robot, store, worker = _setup()
+        _write_action(store, [1.0, 2.0, 3.0], 1000.0)
 
         worker.tick()
 
-        np.testing.assert_allclose(robot.sent[0], [5.0, 5.0, 9.0])
-
-    def test_writing_can_be_turned_on_mid_session(self) -> None:
-        robot, store, worker = _setup(write_actions=False)
-        for joint in JOINTS:
-            store.write(_action_key(joint), 1.0, timestamp=1.0)
-
-        worker.tick()
-        worker.write_actions = True
-        worker.tick()
-
-        assert len(robot.sent) == 1
+        np.testing.assert_allclose(robot.sent[-1], [1.0, 2.0, 3.0])
 
     def test_the_observation_is_still_published_while_driving(self) -> None:
-        _robot, store, worker = _setup(write_actions=True)
+        _robot, store, worker = _setup()
+        _write_action(store, [1.0, 2.0, 3.0], 1000.0)
 
         worker.tick()
 
         assert len(store.snapshot(worker.observation_keys)) == len(JOINTS)
+
+
+class TestRamping:
+    """A control writes at its own rate; the arm is moved across the gap.
+
+    Sending each action as a step would move the arm in jumps as coarse as the
+    writer's period. The timestamps give the spacing without the two loops
+    sharing a clock.
+    """
+
+    def test_a_later_action_is_approached_across_its_own_period(self) -> None:
+        clock = _Clock()
+        robot, store, worker = _setup(clock=clock)
+        _write_action(store, [0.0, 0.0, 0.0], 1.0)
+        worker.tick()
+
+        # Written 100ms after the last, so the ramp spans 100ms.
+        _write_action(store, [10.0, 10.0, 10.0], 1.1)
+        worker.tick()
+        clock.advance(0.05)
+        worker.tick()
+
+        np.testing.assert_allclose(robot.sent[-1], [5.0, 5.0, 5.0], atol=1e-5)
+
+    def test_it_arrives_at_the_target(self) -> None:
+        clock = _Clock()
+        robot, store, worker = _setup(clock=clock)
+        _write_action(store, [0.0, 0.0, 0.0], 1.0)
+        worker.tick()
+        _write_action(store, [10.0, 10.0, 10.0], 1.1)
+        worker.tick()
+
+        clock.advance(0.1)
+        worker.tick()
+
+        np.testing.assert_allclose(robot.sent[-1], [10.0, 10.0, 10.0])
+
+    def test_it_never_goes_past_the_target(self) -> None:
+        """A control that stalls leaves the arm holding its last command."""
+        clock = _Clock()
+        robot, store, worker = _setup(clock=clock)
+        _write_action(store, [0.0, 0.0, 0.0], 1.0)
+        worker.tick()
+        _write_action(store, [10.0, 10.0, 10.0], 1.1)
+        worker.tick()
+
+        clock.advance(5.0)
+        worker.tick()
+        worker.tick()
+
+        np.testing.assert_allclose(robot.sent[-1], [10.0, 10.0, 10.0])
+
+    def test_a_slow_control_is_still_commanded_every_tick(self) -> None:
+        """The point of ramping: many small commands, not one step per action."""
+        clock = _Clock()
+        robot, store, worker = _setup(clock=clock)
+        _write_action(store, [0.0, 0.0, 0.0], 1.0)
+        worker.tick()
+        _write_action(store, [10.0, 10.0, 10.0], 1.2)
+
+        for _ in range(5):
+            worker.tick()
+            clock.advance(0.01)
+
+        assert len(robot.sent) == 6
+        moved = [float(sent[0]) for sent in robot.sent[1:]]
+        assert moved == sorted(moved), "the ramp did not advance monotonically"
+        assert 0.0 < moved[-1] < 10.0, f"expected a partial ramp, got {moved[-1]}"
+
+    def test_a_ramp_starts_from_the_previous_target_not_the_measurement(self) -> None:
+        """A follower lagging behind must not make the trajectory lag further."""
+        clock = _Clock()
+        robot, store, worker = _setup(clock=clock)
+        _write_action(store, [10.0, 10.0, 10.0], 1.0)
+        worker.tick()
+        # The arm is nowhere near its command; the next ramp starts from the
+        # command, not from here.
+        robot.positions = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+        _write_action(store, [20.0, 20.0, 20.0], 1.1)
+        worker.tick()
+        clock.advance(0.05)
+        worker.tick()
+
+        np.testing.assert_allclose(robot.sent[-1], [15.0, 15.0, 15.0], atol=1e-5)
 
 
 @contextmanager
@@ -192,8 +306,8 @@ class TestRunAt:
 
         run_at(worker, hz=1000, should_stop=should_stop)
 
-        assert robot.sent == []
         assert ticks == 4
+        assert len(robot.sent) == 3, "the loop checked four times, so it ticked three"
 
     def test_a_slow_tick_is_reported_once_per_interval(self) -> None:
         """At 100Hz a line per overrun would bury the signal in its own noise."""

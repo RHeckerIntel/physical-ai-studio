@@ -105,8 +105,8 @@ async def test_nothing_is_connected() -> None:
     assert not any(driver.connected for driver in factory.drivers)
 
 
-async def test_a_teleoperator_is_described_too() -> None:
-    """A leader contributes features even though it is not recorded."""
+async def test_a_teleoperator_is_described_as_a_leader() -> None:
+    """A leader contributes observations, but is not one of the driven robots."""
     environment = _Environment(
         robots=[_Configured(robot=_Robot("follower"), tele_operator=_Teleoperator(robot=_Robot("leader")))]
     )
@@ -114,9 +114,12 @@ async def test_a_teleoperator_is_described_too() -> None:
 
     shape = await describe_environment(environment, factory)
 
-    assert [robot.key for robot in shape.robots] == ["follower", "leader"]
-    assert [robot.role for robot in shape.robots] == ["follower", "leader"]
-    assert [robot.key for robot in shape.followers] == ["follower"]
+    assert [robot.key for robot in shape.robots] == ["follower"]
+    assert [leader.key for leader in shape.leaders] == ["leader"]
+    # No action slots for a leader: nothing commands one.
+    spec = shape.feature_spec()
+    assert "action.leader.shoulder_pan.pos" not in spec
+    assert "observation.leader.shoulder_pan.pos" in spec
 
 
 async def test_a_teleoperator_of_none_adds_nothing() -> None:

@@ -13,6 +13,7 @@ already holds.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID  # noqa: TC003  # FastAPI evaluates websocket annotations at runtime
 
@@ -27,13 +28,20 @@ from api.dependencies import (
     RobotClientFactoryDep,
     get_dataset_id,
     get_environment_id,
+    get_model_id,
     get_project_id,
 )
 from exceptions import BaseException as AppBaseException
+from runtimev2.control.config import describe as describe_control
+from runtimev2.control.config import parse as parse_control
+from runtimev2.inference import export_dir
 from runtimev2.session import DEFAULT_DATASET_HZ, RuntimeSession
+from schemas.hardware import InferenceDevice
 from settings import get_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from runtimev2.store import FeatureStore
     from services.dataset_service import DatasetService
     from services.environment_service import EnvironmentService
@@ -60,7 +68,8 @@ def _state_message(session: RuntimeSession) -> dict[str, Any]:
             "environment": loaded.environment if loaded else None,
             "robots": loaded.robots if loaded else {},
             "cameras": list(loaded.cameras) if loaded else [],
-            "teleoperating": loaded.teleoperating if loaded else False,
+            "leaders": list(loaded.leaders) if loaded else [],
+            "control": describe_control(state.control) if state.control else None,
             "features": loaded.features if loaded else 0,
             "dataset_loaded": state.dataset_loaded,
             "dataset_id": state.dataset_id,
@@ -68,6 +77,9 @@ def _state_message(session: RuntimeSession) -> dict[str, Any]:
             "is_recording": state.is_recording,
             "episodes_recorded": state.episodes_recorded,
             "task": state.task,
+            "model_loaded": state.model_loaded,
+            "model_id": state.model_id,
+            "model_chunk_size": state.model_chunk_size,
         },
     }
 
@@ -123,6 +135,100 @@ async def _handle_incoming(
         logger.debug("runtimev2 websocket closed; ending the session")
 
 
+@dataclass(frozen=True, slots=True)
+class _Command:
+    """One client message, with everything a handler might need to serve it."""
+
+    session: RuntimeSession
+    environment_service: EnvironmentService
+    dataset_service: DatasetService
+    project_id: UUID
+    message: dict[str, Any]
+
+    def arg(self, name: str) -> Any:
+        return self.message.get(name)
+
+
+async def _load_environment(command: _Command) -> None:
+    environment = await command.environment_service.get_environment_by_id(
+        command.project_id, get_environment_id(str(command.arg("environment_id")))
+    )
+    await command.session.load(environment)
+
+
+async def _unload_environment(command: _Command) -> None:
+    await command.session.unload()
+
+
+async def _set_control(command: _Command) -> None:
+    """Choose what drives the followers.
+
+    Takes a config -- ``{"kind": "teleop", "hz": 100}`` -- or a bare kind when
+    the default rate will do, or null to drive with nothing.
+    """
+    await command.session.select_control(parse_control(command.arg("control")))
+
+
+async def _load_dataset(command: _Command) -> None:
+    dataset = await command.dataset_service.get_dataset_by_id(get_dataset_id(str(command.arg("dataset_id"))))
+    await command.session.load_dataset(
+        dataset.id,
+        get_settings().datasets_dir / str(dataset.id),
+        hz=int(command.arg("hz") or DEFAULT_DATASET_HZ),
+    )
+
+
+async def _unload_dataset(command: _Command) -> None:
+    await command.session.unload_dataset()
+
+
+async def _start_recording(command: _Command) -> None:
+    command.session.start_recording(str(command.arg("task")))
+
+
+async def _save_episode(command: _Command) -> None:
+    await command.session.save_episode()
+
+
+async def _discard_episode(command: _Command) -> None:
+    await command.session.discard_episode()
+
+
+async def _set_task(command: _Command) -> None:
+    task = command.arg("task")
+    command.session.set_task(str(task) if task else None)
+
+
+async def _load_model(command: _Command) -> None:
+    # ``{"backend": "...", "device": "..."}``, as the hardware endpoints report it.
+    selected = InferenceDevice.model_validate(command.arg("inference_device"))
+    model_id = get_model_id(str(command.arg("model_id")))
+    await command.session.load_policy(
+        model_id,
+        export_dir(get_settings().models_dir, model_id, selected.backend.value),
+        device=selected.device,
+    )
+
+
+async def _unload_model(command: _Command) -> None:
+    await command.session.unload_policy()
+
+
+_HANDLERS: dict[str, Callable[[_Command], Awaitable[None]]] = {
+    "load_environment": _load_environment,
+    "unload_environment": _unload_environment,
+    "set_control": _set_control,
+    "load_dataset": _load_dataset,
+    "unload_dataset": _unload_dataset,
+    "start_recording": _start_recording,
+    "save_episode": _save_episode,
+    "discard_episode": _discard_episode,
+    "set_task": _set_task,
+    "load_model": _load_model,
+    "unload_model": _unload_model,
+}
+
+
 async def _apply(
     websocket: WebSocket,
     session: RuntimeSession,
@@ -131,35 +237,18 @@ async def _apply(
     project_id: UUID,
     message: dict[str, Any],
 ) -> None:
-    """Run one client command, then report the session's new state."""
-    event = message.get("event")
-    if event == "load_environment":
-        environment = await environment_service.get_environment_by_id(
-            project_id, get_environment_id(message["environment_id"])
-        )
-        await session.load(environment)
-    elif event == "unload_environment":
-        await session.unload()
-    elif event == "set_teleoperating":
-        session.require_environment().set_teleoperating(bool(message.get("enabled")))
-    elif event == "load_dataset":
-        dataset = await dataset_service.get_dataset_by_id(get_dataset_id(message["dataset_id"]))
-        await session.load_dataset(
-            dataset.id,
-            get_settings().datasets_dir / str(dataset.id),
-            hz=int(message.get("hz") or DEFAULT_DATASET_HZ),
-        )
-    elif event == "unload_dataset":
-        await session.unload_dataset()
-    elif event == "start_recording":
-        session.start_recording(str(message["task"]))
-    elif event == "save_episode":
-        await session.save_episode()
-    elif event == "discard_episode":
-        await session.discard_episode()
-    else:
+    """Run one client command, then report the session's new state.
+
+    An unknown event is ignored rather than refused: this endpoint exists to
+    change shape, so a client that knows about an event this build does not
+    should not have its connection broken by asking.
+    """
+    event = str(message.get("event"))
+    handler = _HANDLERS.get(event)
+    if handler is None:
         logger.debug("Ignoring unknown runtimev2 event {}", event)
         return
+    await handler(_Command(session, environment_service, dataset_service, project_id, message))
     await websocket.send_json(_state_message(session))
 
 
@@ -198,7 +287,7 @@ async def runtimev2_websocket(
 
     Accepts ``{"event": "load_environment", "environment_id": "..."}``,
     ``{"event": "unload_environment"}``,
-    ``{"event": "set_teleoperating", "enabled": true}`` and
+    ``{"event": "set_control", "control": {"kind": "teleop", "hz": 100}}`` and
     ``{"event": "disconnect"}``.
 
     The session opens empty. Nothing is connected until an environment is
