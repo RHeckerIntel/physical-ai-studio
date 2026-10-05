@@ -84,6 +84,19 @@ def _state_message(session: RuntimeSession) -> dict[str, Any]:
     }
 
 
+def _ack_message(request_id: str, *, exc: Exception | None = None) -> dict[str, Any]:
+    """Answer one identified command, after its effect is already reported.
+
+    Sent after the ``state`` the command produced, so a client awaiting it has
+    the resulting state in hand by the time it resolves.
+    """
+    data: dict[str, Any] = {"request_id": request_id, "ok": exc is None}
+    if exc is not None:
+        data["error"] = exc.message if isinstance(exc, AppBaseException) else str(exc)
+        data["error_code"] = exc.error_code if isinstance(exc, AppBaseException) else "runtime_command_failed"
+    return {"event": "ack", "data": data}
+
+
 def _error_message(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, AppBaseException):
         return {"event": "error", "message": exc.message, "error_code": exc.error_code}
@@ -119,6 +132,13 @@ async def _handle_incoming(
     Returns on an explicit ``disconnect``, or when the socket closes. A command
     that fails is reported and the session carries on -- asking to load an
     environment whose robot is unplugged should not drop the connection.
+
+    A command carrying ``request_id`` is answered with an ``ack`` bearing the
+    same id. Nothing else correlates a reply with the command that caused it:
+    the stream is one-way, so without an id a client watching ``state`` cannot
+    tell its own save from someone else's, or a slow one from a failed one.
+    An unknown command is ignored when nothing is waiting on it and refused by
+    ack when something is, so an awaited request always gets an answer.
     """
     try:
         while True:
@@ -126,11 +146,25 @@ async def _handle_incoming(
             event = message.get("event")
             if event == "disconnect":
                 return
+            request_id = message.get("request_id")
+            request_id = str(request_id) if request_id is not None else None
             try:
-                await _apply(websocket, session, environment_service, dataset_service, project_id, message)
+                handled = await _apply(websocket, session, environment_service, dataset_service, project_id, message)
             except Exception as exc:
                 logger.warning("runtimev2 command {} failed: {}", event, exc)
-                await websocket.send_json(_error_message(exc))
+                # Reported once, to whoever asked: an identified request gets
+                # an identified answer rather than that plus a loose error.
+                if request_id is None:
+                    await websocket.send_json(_error_message(exc))
+                else:
+                    await websocket.send_json(_ack_message(request_id, exc=exc))
+            else:
+                if request_id is not None:
+                    await websocket.send_json(
+                        _ack_message(request_id)
+                        if handled
+                        else _ack_message(request_id, exc=ValueError(f"Unknown command {event!r}"))
+                    )
     except WebSocketDisconnect:
         logger.debug("runtimev2 websocket closed; ending the session")
 
@@ -236,20 +270,23 @@ async def _apply(
     dataset_service: DatasetService,
     project_id: UUID,
     message: dict[str, Any],
-) -> None:
-    """Run one client command, then report the session's new state.
+) -> bool:
+    """Run one client command and report the session's new state.
 
-    An unknown event is ignored rather than refused: this endpoint exists to
-    change shape, so a client that knows about an event this build does not
-    should not have its connection broken by asking.
+    Returns:
+        Whether the command was one this build knows. An unknown one is
+        ignored rather than closing the socket: this endpoint exists to change
+        shape, so a client ahead of the server should not lose its connection
+        for asking.
     """
     event = str(message.get("event"))
     handler = _HANDLERS.get(event)
     if handler is None:
         logger.debug("Ignoring unknown runtimev2 event {}", event)
-        return
+        return False
     await handler(_Command(session, environment_service, dataset_service, project_id, message))
     await websocket.send_json(_state_message(session))
+    return True
 
 
 async def _handle_outgoing(websocket: WebSocket, session: RuntimeSession) -> None:
@@ -289,6 +326,9 @@ async def runtimev2_websocket(
     ``{"event": "unload_environment"}``,
     ``{"event": "set_control", "control": {"kind": "teleop", "hz": 100}}`` and
     ``{"event": "disconnect"}``.
+
+    Any command may carry a ``request_id``; it is answered with an ``ack``
+    carrying the same id once the command has run.
 
     The session opens empty. Nothing is connected until an environment is
     loaded, and one can be swapped for another without reconnecting.
