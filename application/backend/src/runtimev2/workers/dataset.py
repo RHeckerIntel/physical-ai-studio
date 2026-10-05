@@ -20,15 +20,20 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from runtime.features import sanitize_camera_name
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, image_feature_key, joint_feature_key
+from runtimev2.features import (
+    ACTION_PREFIX,
+    OBSERVATION_PREFIX,
+    image_feature_key,
+    joint_feature_key,
+    sanitize_dataset_camera_name,
+)
 from runtimev2.workers.base import ThreadedWorker
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-    from runtime.callbacks.recording import RecordingState
     from runtimev2.environment import SessionShape
+    from runtimev2.recording import RecordingState
     from runtimev2.session_store import SessionStore
 
 
@@ -59,7 +64,9 @@ class DatasetWorker(ThreadedWorker):
         self._actions = {
             joint_feature_key(ACTION_PREFIX, follower.key, joint): f"{joint}.pos" for joint in follower.joint_names
         }
-        self._images = {image_feature_key(camera.key): sanitize_camera_name(camera.name) for camera in shape.cameras}
+        self._images = {
+            image_feature_key(camera.key): sanitize_dataset_camera_name(camera.name) for camera in shape.cameras
+        }
         self._skipped = 0
 
     @contextmanager

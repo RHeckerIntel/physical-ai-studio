@@ -14,16 +14,16 @@ take the rate the caller asked for.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from internal_datasets.access_mode import DatasetAccessMode
 from internal_datasets.lerobot.lerobot_dataset import InternalLeRobotDataset
-from runtime.dataset_features import build_lerobot_dataset_features
-from runtime.features import sanitize_camera_name
-from runtimev2.dataset_layout import DatasetLayout
+from runtimev2.dataset_layout import DatasetLayout, build_lerobot_dataset_features
+from runtimev2.features import sanitize_dataset_camera_name
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -136,7 +136,7 @@ def open_for_recording(
     follower = followers[0]
 
     fps = dataset_fps(path, requested_fps)
-    specs = camera_specs or {sanitize_camera_name(camera.name): camera.shape for camera in shape.cameras}
+    specs = camera_specs or {sanitize_dataset_camera_name(camera.name): camera.shape for camera in shape.cameras}
     dataset = InternalLeRobotDataset(path, access_mode=DatasetAccessMode.RECORDING_MUTATION)
     mutation = dataset.start_recording_mutation(
         fps=fps,
@@ -148,3 +148,111 @@ def open_for_recording(
     )
     logger.info("Dataset {} open for recording at {}Hz", dataset_id, fps)
     return LoadedDataset(dataset_id=dataset_id, path=path, fps=fps), mutation
+
+
+class RecordingState:
+    """Recording flags and the open mutation, shared across threads.
+
+    Owned by the session rather than a loaded environment, so an episode
+    opened before an environment swap is the same episode after it.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._dataset_loaded = False
+        self._is_recording = False
+        self._episodes_recorded = 0
+        self._task: str | None = None
+        self._mutation: RecordingMutation | None = None
+        self._closed = False
+
+    @property
+    def dataset_loaded(self) -> bool:
+        with self._lock:
+            return self._dataset_loaded
+
+    @property
+    def is_recording(self) -> bool:
+        with self._lock:
+            return self._is_recording
+
+    @property
+    def episodes_recorded(self) -> int:
+        with self._lock:
+            return self._episodes_recorded
+
+    def start(self, task: str) -> bool:
+        """Begin an episode. Return False when no dataset is loaded."""
+        with self._lock:
+            if self._mutation is None or self._closed:
+                return False
+            self._task = task
+            self._is_recording = True
+            return True
+
+    def attach_mutation(self, mutation: RecordingMutation) -> None:
+        with self._lock:
+            self._mutation = mutation
+            self._dataset_loaded = True
+            self._is_recording = False
+
+    def mark_saved(self) -> None:
+        with self._lock:
+            self._is_recording = False
+            self._episodes_recorded += 1
+
+    def mark_discarded(self) -> None:
+        with self._lock:
+            self._is_recording = False
+
+    def add_frame(self, observation: dict[str, Any], action: dict[str, float]) -> None:
+        """Write one tick under the state lock so save/discard cannot interleave."""
+        with self._lock:
+            if self._closed or not self._is_recording or self._mutation is None or self._task is None:
+                return
+            self._mutation.add_frame(observation, action, self._task)
+
+    def stop_episode(self) -> RecordingMutation:
+        """Clear the recording flag so ticks skip, then return the mutation.
+
+        Save and discard run off the control thread. Stopping first means an
+        in-flight ``add_frame`` finishes (it holds this lock), then later ticks
+        see ``is_recording`` is false and skip, then video encode can run.
+        """
+        with self._lock:
+            if not self._is_recording or self._mutation is None:
+                raise RuntimeError("No episode is being recorded.")
+            self._is_recording = False
+            return self._mutation
+
+    def current_mutation(self) -> RecordingMutation | None:
+        """Return the attached mutation without requiring an open episode.
+
+        Discard doubles as the recovery path after a failed save, which has
+        already cleared the recording flag. Requiring an open episode there
+        would leave the buffer with no way to clear it.
+        """
+        with self._lock:
+            self._is_recording = False
+            return self._mutation
+
+    def take_mutation(self) -> RecordingMutation | None:
+        """Detach the mutation so teardown can finalize it once.
+
+        ``_episodes_recorded`` counts episodes saved into the attached mutation
+        and not yet copied into the dataset. Detaching is the moment that count
+        becomes zero: the UI adds it to the episodes the dataset API returns, so
+        leaving it set double-counts every episode once the copy lands.
+        """
+        with self._lock:
+            mutation = self._mutation
+            self._mutation = None
+            self._is_recording = False
+            self._dataset_loaded = False
+            self._task = None
+            self._episodes_recorded = 0
+            return mutation
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True

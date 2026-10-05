@@ -19,9 +19,14 @@ import numpy as np
 from loguru import logger
 from physicalai.inference.constants import IMAGES, STATE, TASK
 
-from runtime.features import sanitize_camera_name
 from runtimev2.control.base import ControlAction, ControlAlgorithm
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, image_feature_key, joint_feature_key
+from runtimev2.features import (
+    ACTION_PREFIX,
+    OBSERVATION_PREFIX,
+    image_feature_key,
+    joint_feature_key,
+    sanitize_dataset_camera_name,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -86,7 +91,9 @@ class ModelControl(ControlAlgorithm):
         self._state_keys = [joint_feature_key(OBSERVATION_PREFIX, follower.key, j) for j in follower.joint_names]
         # Image inputs use the dataset's camera naming, because that is what the
         # model was trained against.
-        self._images = {image_feature_key(camera.key): sanitize_camera_name(camera.name) for camera in shape.cameras}
+        self._images = {
+            image_feature_key(camera.key): sanitize_dataset_camera_name(camera.name) for camera in shape.cameras
+        }
         self._skipped = 0
 
     @property

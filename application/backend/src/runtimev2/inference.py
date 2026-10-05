@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING
 from loguru import logger
 from physicalai.inference.preprocessors import ToFloatTensorPreprocessor
 
-from runtime.features import sanitize_camera_name
 from runtimev2.control.model import check_camera_keys
+from runtimev2.features import sanitize_dataset_camera_name
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,7 +94,7 @@ def load_model(
         raise FileNotFoundError(str(path))
     model = InferenceModel(export_dir=path, policy_name=None, backend="auto", device=device)
     _ensure_image_conversion(model)
-    check_camera_keys(model, [sanitize_camera_name(camera.name) for camera in shape.cameras])
+    check_camera_keys(model, [sanitize_dataset_camera_name(camera.name) for camera in shape.cameras])
     logger.info("Model {} loaded from {} with chunk size {}", model_id, path, model.chunk_size)
     return (
         LoadedModel(model_id=model_id, export_dir=path, chunk_size=int(model.chunk_size)),

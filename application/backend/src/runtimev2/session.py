@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from runtime.callbacks.recording import RecordingState
 from runtimev2.control.config import ControlConfig, ModelControlConfig, TeleopControlConfig
 from runtimev2.control.model import ModelControl
 from runtimev2.control.teleop import TeleopControl
@@ -35,7 +34,7 @@ from runtimev2.inference import LoadedModel, load_model
 from runtimev2.leader import open_leaders
 from runtimev2.loaded_environment import DEFAULT_ROBOT_HZ, LoadedEnvironment
 from runtimev2.pinning import CameraPinning
-from runtimev2.recording import LoadedDataset, open_for_recording
+from runtimev2.recording import LoadedDataset, RecordingState, open_for_recording
 from runtimev2.workers.dataset import DatasetWorker
 from workers.base import ManagedLifecycle
 

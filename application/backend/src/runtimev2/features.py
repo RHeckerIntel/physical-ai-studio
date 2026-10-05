@@ -70,6 +70,16 @@ def image_feature_key(camera: str) -> str:
     return f"{OBSERVATION_PREFIX}.{IMAGE_INFIX}.{camera}"
 
 
+def sanitize_dataset_camera_name(name: str) -> str:
+    """The camera key a dataset is written with.
+
+    Deliberately not :func:`sanitize_name`: this keeps spaces, because datasets
+    already on disk were recorded with them. Tightening it would orphan every
+    recording from a camera whose name has a space in it.
+    """
+    return re.sub(r"[^a-z0-9 _-]+", "_", name.lower())
+
+
 def robot_features(robot: str, joint_names: Sequence[str]) -> list[Feature]:
     """Return the observation and action features for a robot we drive.
 

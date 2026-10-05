@@ -25,8 +25,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from runtime.features import sanitize_camera_name
-from runtimev2.features import IMAGE_INFIX, OBSERVATION_PREFIX
+from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
+from lerobot.processor import make_default_processors
+from lerobot.utils.feature_utils import combine_feature_dicts
+
+from runtimev2.features import IMAGE_INFIX, OBSERVATION_PREFIX, sanitize_dataset_camera_name
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -86,10 +89,10 @@ class DatasetLayout:
         }
         for camera in shape.cameras:
             # Deliberately not the session key: datasets on disk were written
-            # with ``sanitize_camera_name``, which keeps spaces, so a camera
+            # with ``sanitize_dataset_camera_name``, which keeps spaces, so a camera
             # called "Overhead Cam" is already stored as ``overhead cam``.
             # Tightening it here would orphan every recording of that camera.
-            entries[f"{IMAGE_PREFIX}{sanitize_camera_name(camera.name)}"] = LayoutEntry(shape=camera.shape)
+            entries[f"{IMAGE_PREFIX}{sanitize_dataset_camera_name(camera.name)}"] = LayoutEntry(shape=camera.shape)
         return cls(entries)
 
     @classmethod
@@ -146,3 +149,40 @@ class DatasetLayout:
 
 def _describe(names: Sequence[str] | None) -> str:
     return "none" if names is None else "(" + ", ".join(names) + ")"
+
+
+def build_lerobot_dataset_features(
+    *,
+    joint_names: list[str],
+    camera_specs: dict[str, tuple[int, int, int]],
+    use_videos: bool = True,
+) -> dict[str, Any]:
+    """Build LeRobot feature metadata from joint names and frame shapes.
+
+    Camera keys must already be sanitized the way a dataset names them -- those
+    are the keys a trained model looks up. Shapes come from what the session
+    saw, so a camera whose row says 640x480 while its publisher serves 1280x720
+    is recorded at the size that actually arrived.
+    """
+    teleop_action_processor, _robot_action_processor, robot_observation_processor = make_default_processors()
+
+    action_features: dict[str, Any] = {}
+    observation_features: dict[str, Any] = {}
+    for joint in joint_names:
+        action_features[f"{joint}.pos"] = float
+        observation_features[f"{joint}.pos"] = float
+    for camera_key, spec in camera_specs.items():
+        observation_features[camera_key] = spec
+
+    return combine_feature_dicts(
+        aggregate_pipeline_dataset_features(
+            pipeline=teleop_action_processor,
+            initial_features=create_initial_features(action=action_features),
+            use_videos=use_videos,
+        ),
+        aggregate_pipeline_dataset_features(
+            pipeline=robot_observation_processor,
+            initial_features=create_initial_features(observation=observation_features),
+            use_videos=use_videos,
+        ),
+    )
