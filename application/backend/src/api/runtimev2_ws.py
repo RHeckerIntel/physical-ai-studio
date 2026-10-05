@@ -23,8 +23,10 @@ from fastapi.websockets import WebSocketDisconnect
 from loguru import logger
 
 from api.dependencies import (
+    CameraClaimRegistryDep,
     DatasetServiceDep,
     EnvironmentServiceDep,
+    ProjectServiceDep,
     RobotClientFactoryDep,
     get_dataset_id,
     get_environment_id,
@@ -35,6 +37,7 @@ from exceptions import BaseException as AppBaseException
 from runtimev2.control.config import describe as describe_control
 from runtimev2.control.config import parse as parse_control
 from runtimev2.inference import export_dir
+from runtimev2.pinning import CameraPinning
 from runtimev2.session import DEFAULT_DATASET_HZ, RuntimeSession
 from schemas.hardware import InferenceDevice
 from settings import get_settings
@@ -318,6 +321,8 @@ async def runtimev2_websocket(
     environment_service: EnvironmentServiceDep,
     dataset_service: DatasetServiceDep,
     robot_client_factory: RobotClientFactoryDep,
+    project_service: ProjectServiceDep,
+    claims: CameraClaimRegistryDep,
     websocket: WebSocket,
 ) -> None:
     """Run one environment for as long as this websocket is open.
@@ -335,7 +340,9 @@ async def runtimev2_websocket(
     """
     await websocket.accept()
     try:
-        async with RuntimeSession(robot_client_factory) as session:
+        project = await project_service.get_project_by_id(project_id)
+        pinning = CameraPinning(registry=claims, project_id=project_id, project_name=project.name)
+        async with RuntimeSession(robot_client_factory, pinning) as session:
             await websocket.send_json(_state_message(session))
             incoming = asyncio.create_task(
                 _handle_incoming(websocket, session, environment_service, dataset_service, project_id)

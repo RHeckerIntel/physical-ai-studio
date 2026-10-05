@@ -33,6 +33,7 @@ from runtimev2.environment import describe_environment
 from runtimev2.inference import LoadedModel, load_model
 from runtimev2.leader import open_leaders
 from runtimev2.loaded_environment import DEFAULT_ROBOT_HZ, LoadedEnvironment
+from runtimev2.pinning import CameraPinning
 from runtimev2.recording import LoadedDataset, open_for_recording
 from runtimev2.workers.dataset import DatasetWorker
 from workers.base import ManagedLifecycle
@@ -93,8 +94,16 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
     Opened with ``async with``; leaving unloads whatever is still loaded.
     """
 
-    def __init__(self, factory: RobotClientFactory, *, robot_hz: float = DEFAULT_ROBOT_HZ) -> None:
+    def __init__(
+        self,
+        factory: RobotClientFactory,
+        pinning: CameraPinning | None = None,
+        *,
+        robot_hz: float = DEFAULT_ROBOT_HZ,
+    ) -> None:
+        """``pinning`` is optional so a test can run without a claim registry."""
         self._factory = factory
+        self._pinning = pinning
         self._robot_hz = robot_hz
         self._loaded: LoadedEnvironment | None = None
         # The loaded environment's own teardown, kept so it can be closed on its
@@ -165,6 +174,9 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
             # what a dataset and a model are checked against, so the session
             # needs it whether or not the devices come up.
             shape = await describe_environment(environment, self._factory)
+            # Pinned before any camera is opened, so a settings clash is a
+            # refusal rather than a session quietly serving the wrong frames.
+            self._pin_cameras(environment, stack)
             leaders = await open_leaders(environment, shape, self._factory, stack)
             loaded = await stack.enter_async_context(
                 LoadedEnvironment(environment, self._factory, shape, leaders, robot_hz=self._robot_hz)
@@ -310,6 +322,20 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
         self._control = config
         if self._loaded is not None:
             await self._open_control()
+
+    def _pin_cameras(self, environment: EnvironmentWithRelations, stack: AsyncExitStack) -> None:
+        """Pin this environment's camera settings for the life of the load.
+
+        Before any camera is opened, so a clash is a refusal rather than a
+        session quietly serving frames at another's resolution.
+
+        Raises:
+            CameraSettingsConflictError: Another session pinned other settings.
+            ValueError: A camera has no fingerprint and must be reselected.
+        """
+        if self._pinning is None or not environment.cameras:
+            return
+        stack.enter_context(self._pinning.hold(environment.cameras))
 
     async def _open_control(self) -> None:
         """Run the chosen control against the loaded environment.

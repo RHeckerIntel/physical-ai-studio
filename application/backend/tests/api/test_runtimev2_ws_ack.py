@@ -7,14 +7,22 @@ another's, nor a slow one from a failed one.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from api.dependencies import get_dataset_service, get_environment_service, get_robot_client_factory
+from api.dependencies import (
+    get_camera_claim_registry,
+    get_dataset_service,
+    get_environment_service,
+    get_project_service,
+    get_robot_client_factory,
+)
 from main import app
+from services.camera_claims import CameraClaimRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -28,11 +36,18 @@ class _NoEnvironments:
         raise RuntimeError("no such environment")
 
 
+class _StubProjectService:
+    async def get_project_by_id(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(id=PROJECT_ID, name="Demo")
+
+
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     app.dependency_overrides[get_environment_service] = _NoEnvironments
     app.dependency_overrides[get_dataset_service] = lambda: object()
     app.dependency_overrides[get_robot_client_factory] = lambda: object()
+    app.dependency_overrides[get_project_service] = _StubProjectService
+    app.dependency_overrides[get_camera_claim_registry] = CameraClaimRegistry
     try:
         yield TestClient(app)
     finally:
