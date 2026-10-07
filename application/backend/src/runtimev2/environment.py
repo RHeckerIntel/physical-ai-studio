@@ -18,7 +18,17 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from runtimev2.features import FeatureSpec, camera_features, leader_features, robot_features, sanitize_name
+from runtimev2.features import (
+    ACTION_KEY,
+    OBSERVATION_PREFIX,
+    STATE_KEY,
+    FeatureSpec,
+    camera_features,
+    leader_features,
+    robot_feature_key,
+    robot_features,
+    sanitize_name,
+)
 
 # Only reached when a camera row has no fps recorded; the usual case is that it
 # does, because the UI makes you pick a format.
@@ -63,6 +73,20 @@ class RobotShape:
     """``follower`` or ``leader``, as the catalog defines it."""
     joint_names: tuple[str, ...]
 
+    @property
+    def observation_key(self) -> str:
+        """Where the driven robot's measured positions live.
+
+        The well-known key, not one derived from this robot's name: a session
+        drives one robot, so a reader need not know which.
+        """
+        return STATE_KEY
+
+    @property
+    def action_key(self) -> str:
+        """Where the driven robot's commanded positions live."""
+        return ACTION_KEY
+
 
 @dataclass(frozen=True, slots=True)
 class LeaderShape:
@@ -71,6 +95,11 @@ class LeaderShape:
     key: str
     robot_id: str
     joint_names: tuple[str, ...]
+
+    @property
+    def observation_key(self) -> str:
+        """Where this arm's measured positions live."""
+        return robot_feature_key(OBSERVATION_PREFIX, self.key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +135,19 @@ class SessionShape:
     """Input devices, kept separate because nothing commands them."""
 
     def feature_spec(self) -> FeatureSpec:
-        """Project this shape onto the session's feature keys."""
+        """Project this shape onto the session's feature keys.
+
+        Raises:
+            ValueError: More than one robot to drive. The state and the action
+                are well-known singular keys, so two would claim the same ones
+                -- the assumption recording and inference already made, failing
+                here where it is violated rather than deeper down.
+        """
+        if len(self.robots) > 1:
+            named = ", ".join(robot.key for robot in self.robots)
+            raise ValueError(f"a session drives one robot, found {len(self.robots)}: {named}")
         return FeatureSpec.build(
-            *(robot_features(robot.key, robot.joint_names) for robot in self.robots),
+            *(robot_features(robot.joint_names) for robot in self.robots),
             *(leader_features(leader.key, leader.joint_names) for leader in self.leaders),
             camera_features({camera.key: camera.shape for camera in self.cameras}),
         )

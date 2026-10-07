@@ -17,7 +17,7 @@ import pytest
 from runtimev2.control.teleop import TeleopControl
 from runtimev2.devices import from_environment
 from runtimev2.environment import describe_devices
-from runtimev2.features import OBSERVATION_PREFIX, joint_feature_key
+from runtimev2.features import ACTION_KEY, OBSERVATION_PREFIX, STATE_KEY, robot_feature_key
 from runtimev2.leader import open_leaders
 from runtimev2.loaded_environment import LoadedEnvironment
 
@@ -218,15 +218,15 @@ class TestLifecycle:
         async with _loaded(environment, factory) as loaded:
             factory.robots["follower"].position = 2.0
             await _settle()
-            sample = loaded.store.read(joint_feature_key(OBSERVATION_PREFIX, "follower", "gripper"))
+            sample = loaded.store.read(STATE_KEY)
 
         assert sample is not None
-        assert sample.value == pytest.approx(2.0)
+        assert list(sample.value) == pytest.approx([2.0] * len(JOINTS))
 
     async def test_a_leader_is_only_read_while_something_uses_it(self) -> None:
         """It has no worker of its own: whichever control drives reads it."""
         environment, factory = _teleop_env()
-        leader_gripper = joint_feature_key(OBSERVATION_PREFIX, "leader", "gripper")
+        leader_gripper = robot_feature_key(OBSERVATION_PREFIX, "leader")
 
         async with _loaded(environment, factory) as loaded:
             factory.robots["leader"].position = 2.0
@@ -234,13 +234,13 @@ class TestLifecycle:
             assert loaded.store.read(leader_gripper) is None, "read with nothing using it"
 
             leader, follower = loaded.pair_for_teleop()
-            control = TeleopControl(leader, loaded.store, loaded.action_keys_for(follower), hz=200.0)
+            control = TeleopControl(leader, loaded.store, follower.joint_names, hz=200.0)
             async with control:
                 await _settle()
                 sample = loaded.store.read(leader_gripper)
 
         assert sample is not None
-        assert sample.value == pytest.approx(2.0)
+        assert list(sample.value) == pytest.approx([2.0] * len(JOINTS))
 
     async def test_a_device_swapped_after_describing_is_refused(self) -> None:
         """Each build resolves a live port, so a different device on the same
@@ -263,28 +263,6 @@ class TestLifecycle:
         with pytest.raises(RuntimeError, match="once connected"):
             async with _loaded(environment, factory):
                 pass
-
-    async def test_a_robot_connected_before_the_failure_is_still_released(self) -> None:
-        """Two robots, the second failing: the first must not be left energized."""
-        environment = _Environment(robots=[_Configured(robot=_Row("first")), _Configured(robot=_Row("second"))])
-        factory = _Factory(roles={"first": "follower", "second": "follower"})
-        original = factory.build_robot_driver
-        builds: dict[str, int] = {}
-
-        async def fail_loading_the_second(robot: _Row, port_finder: object) -> tuple[_Driver, _Definition]:
-            builds[robot.name] = builds.get(robot.name, 0) + 1
-            # The second build is the load; by then the first is connected.
-            if robot.name == "second" and builds[robot.name] > 1:
-                raise RuntimeError("this driver refused to build")
-            return await original(robot, port_finder)
-
-        factory.build_robot_driver = fail_loading_the_second  # type: ignore[method-assign]
-
-        with pytest.raises(RuntimeError, match="refused to build"):
-            async with _loaded(environment, factory):
-                pass
-
-        assert factory.robots["first"].disconnects == 1
 
 
 @pytest.fixture
@@ -371,8 +349,8 @@ class TestCameras:
 
 def _write_action(loaded: LoadedEnvironment, value: float) -> None:
     """Write what a control would, without running one."""
-    keys = loaded.action_keys_for(loaded.shape.robots[0])
-    loaded.store.write_many(dict.fromkeys(keys, value), timestamp=9.0)
+    robot = loaded.shape.robots[0]
+    loaded.store.write(ACTION_KEY, [value] * len(robot.joint_names), timestamp=9.0)
 
 
 class TestFollowing:
@@ -406,8 +384,7 @@ class TestFollowing:
 
         async with _loaded(environment, factory) as loaded:
             resting = factory.robots["follower"].position
-            key = loaded.action_keys_for(loaded.shape.robots[0])[0]
-            sample = loaded.store.read(key)
+            sample = loaded.store.read(ACTION_KEY)
 
         assert sample is not None
-        assert sample.value == pytest.approx(resting)
+        assert list(sample.value) == pytest.approx([resting] * len(JOINTS))

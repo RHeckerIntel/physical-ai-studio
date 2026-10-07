@@ -25,8 +25,9 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from runtimev2.control.config import ControlConfig, ModelControlConfig, TeleopControlConfig
+from runtimev2.control.config import ControlConfig, ModelControlConfig, MoveControlConfig, TeleopControlConfig
 from runtimev2.control.model import ModelControl
+from runtimev2.control.move import MoveControl
 from runtimev2.control.teleop import TeleopControl
 from runtimev2.devices import DeviceSet
 from runtimev2.environment import describe_devices
@@ -373,7 +374,7 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
                 if pair is None:
                     raise RuntimeError(f"{loaded.name} has no leader to teleoperate from")
                 leader, follower = pair
-                return TeleopControl(leader, loaded.store, loaded.action_keys_for(follower), hz=config.hz)
+                return TeleopControl(leader, loaded.store, follower.joint_names, hz=config.hz)
             case ModelControlConfig():
                 if self._policy is None:
                     raise RuntimeError("No model is loaded to drive with")
@@ -381,6 +382,8 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
                 # conditioned on is part of choosing it, and may legitimately
                 # differ from the label a recording stores.
                 return ModelControl(self._policy, loaded.store, loaded.shape, hz=config.hz, task=config.task)
+            case MoveControlConfig():
+                return MoveControl(loaded.store, hz=config.hz, goal_time=config.time, goal_position=config.position)
 
     async def load_policy(
         self,

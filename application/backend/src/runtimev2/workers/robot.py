@@ -33,7 +33,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 from loguru import logger
 
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, joint_feature_key
 from runtimev2.workers.base import ThreadedWorker
 
 if TYPE_CHECKING:
@@ -77,7 +76,8 @@ class RobotWorker(ThreadedWorker):
         self._robot = robot
         self._store = store
         self._shape = shape
-        self._joint_names = list(shape.joint_names)
+        self._observation_key = shape.observation_key
+        self._action_key = shape.action_key
         # The segment currently being ramped across, and when this worker first
         # saw its target. Timed from arrival rather than from the writer's
         # clock, which is not this one.
@@ -86,17 +86,15 @@ class RobotWorker(ThreadedWorker):
         self._goal_time = 0.0
         self._target_timestamp: float | None = None
         self._target_seen_at = 0.0
-        self._observation_keys = [joint_feature_key(OBSERVATION_PREFIX, shape.key, j) for j in self._joint_names]
-        self._action_keys = [joint_feature_key(ACTION_PREFIX, shape.key, j) for j in self._joint_names]
         self._connected = False
 
     @property
-    def observation_keys(self) -> tuple[str, ...]:
-        return tuple(self._observation_keys)
+    def observation_key(self) -> str:
+        return self._observation_key
 
     @property
-    def action_keys(self) -> tuple[str, ...]:
-        return tuple(self._action_keys)
+    def action_key(self) -> str:
+        return self._action_key
 
     @contextmanager
     def acquire(self) -> Generator[None]:
@@ -142,17 +140,7 @@ class RobotWorker(ThreadedWorker):
         """
         if not self._connected:
             raise RuntimeError(f"Robot {self._shape.key} is not connected")
-        _t0 = time.monotonic()
-        observation = self._robot.get_observation()
-        _t1 = time.monotonic()
-        positions = np.asarray(observation.joint_positions, dtype=np.float32)
-        self._store.write_many(
-            {key: float(value) for key, value in zip(self._observation_keys, positions, strict=True)},
-            timestamp=observation.timestamp,
-        )
-        self._drive(positions)
-        if time.monotonic() - _t0 > 0.03:
-            logger.warning("SLOWTICK {} read={:.1f}ms", self._shape.key, (_t1 - _t0) * 1000)
+        self._drive(self._publish_observation())
 
     def _hold_current_position(self) -> None:
         """Seed the action features with where the arm is.
@@ -163,9 +151,9 @@ class RobotWorker(ThreadedWorker):
         action to follow at all.
         """
         observation = self._robot.get_observation()
-        positions = np.asarray(observation.joint_positions, dtype=np.float32)
-        self._store.write_many(
-            {key: float(value) for key, value in zip(self._action_keys, positions, strict=True)},
+        self._store.write(
+            self._action_key,
+            np.asarray(observation.joint_positions, dtype=np.float32),
             timestamp=observation.timestamp,
         )
 
@@ -173,25 +161,22 @@ class RobotWorker(ThreadedWorker):
         """Publish the robot's current joints, and return them."""
         observation = self._robot.get_observation()
         positions = np.asarray(observation.joint_positions, dtype=np.float32)
-        values = {key: float(position) for key, position in zip(self._observation_keys, positions, strict=True)}
         # The robot's own capture time, so a reader sees when the measurement
         # was taken rather than when it was stored.
-        self._store.write_many(values, timestamp=observation.timestamp)
+        self._store.write(self._observation_key, positions, timestamp=observation.timestamp)
         return positions
 
     def _drive(self, positions: np.ndarray) -> None:
         """Send where the arm should be now, ramping toward the newest action.
 
-        Waits until every joint has been written. A partly written action has no
-        safe filler -- holding a position the robot was never commanded to is as
-        arbitrary as sending a zero -- so nothing is sent until some control has
-        spoken for each joint.
+        Nothing is sent until a control has written one: there is no safe
+        filler for a position the robot was never commanded to.
         """
-        samples = self._store.snapshot(self._action_keys)
-        if len(samples) != len(self._action_keys):
+        sample = self._store.read(self._action_key)
+        if sample is None:
             return
-        target = np.array([samples[key].value for key in self._action_keys], dtype=np.float32)
-        timestamp = max(sample.timestamp for sample in samples.values())
+        target = np.asarray(sample.value, dtype=np.float32)
+        timestamp = sample.timestamp
         if timestamp != self._target_timestamp:
             self._begin_segment(positions, target, timestamp)
         command = self._interpolate(target)

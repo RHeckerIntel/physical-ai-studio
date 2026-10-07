@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from runtimev2.environment import RobotShape, SessionShape
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, joint_feature_key
+from runtimev2.features import ACTION_KEY, STATE_KEY
 from runtimev2.robot_process import RobotProcess, RobotRecipe
 from runtimev2.session_store import SessionStore
 
@@ -38,27 +38,24 @@ def _recipe(**overrides: object) -> RobotRecipe:
 class TestTheProcess:
     async def test_it_publishes_observations_the_parent_can_read(self, store: SessionStore) -> None:
         """The whole point: the loop runs elsewhere, the truth is shared."""
-        key = joint_feature_key(OBSERVATION_PREFIX, "arm", "gripper")
+        key = STATE_KEY
 
         async with RobotProcess(_recipe(), SESSION, store.shared_name):
             await asyncio.sleep(0.4)
             sample = store.read(key)
 
         assert sample is not None, "the child never published"
-        assert sample.value == pytest.approx(1.5)
+        assert list(sample.value) == pytest.approx([1.5] * len(JOINTS))
 
     async def test_it_follows_actions_the_parent_writes(self, store: SessionStore) -> None:
         async with RobotProcess(_recipe(), SESSION, store.shared_name):
             await asyncio.sleep(0.3)
-            store.write_many(
-                {joint_feature_key(ACTION_PREFIX, "arm", joint): 4.0 for joint in JOINTS},
-                timestamp=1_000.0,
-            )
+            store.write(ACTION_KEY, [4.0] * len(JOINTS), timestamp=1_000.0)
             await asyncio.sleep(0.4)
-            commanded = store.read(joint_feature_key(ACTION_PREFIX, "arm", "gripper"))
+            commanded = store.read(ACTION_KEY)
 
         assert commanded is not None
-        assert commanded.value == pytest.approx(4.0)
+        assert list(commanded.value) == pytest.approx([4.0] * len(JOINTS))
 
     async def test_a_driver_that_will_not_build_is_reported(self, store: SessionStore) -> None:
         """The child cannot raise into the parent, so the reason travels back."""

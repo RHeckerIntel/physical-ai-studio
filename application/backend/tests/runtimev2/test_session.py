@@ -15,7 +15,7 @@ import pytest
 from runtimev2.control.config import ModelControlConfig, TeleopControlConfig
 from runtimev2.control.teleop import JointMappingError
 from runtimev2.devices import from_environment
-from runtimev2.features import ACTION_PREFIX, joint_feature_key
+from runtimev2.features import ACTION_KEY
 from runtimev2.session import RuntimeSession
 
 if TYPE_CHECKING:
@@ -437,7 +437,7 @@ class TestPolicyAboveEnvironment:
             await session.load(from_environment(environment))
             await session.load_policy(uuid4(), tmp_path, device="cpu")
             await _settle()
-            action = session.require_environment().store.read(joint_feature_key(ACTION_PREFIX, "follower", "gripper"))
+            action = session.require_environment().store.read(ACTION_KEY)
 
         assert action is not None
 

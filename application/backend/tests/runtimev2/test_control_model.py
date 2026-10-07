@@ -13,7 +13,7 @@ from physicalai.inference.constants import IMAGES, STATE, TASK
 
 from runtimev2.control.model import ModelCameraMismatchError, ModelControl, check_camera_keys
 from runtimev2.environment import CameraShape, RobotShape, SessionShape
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, image_feature_key, joint_feature_key
+from runtimev2.features import ACTION_KEY, STATE_KEY, image_feature_key
 from runtimev2.store import FeatureStore
 
 JOINTS = ("shoulder_pan", "gripper")
@@ -55,14 +55,9 @@ def _shape(cameras: int = 1) -> SessionShape:
     )
 
 
-def _action_key(joint: str) -> str:
-    return joint_feature_key(ACTION_PREFIX, "follower", joint)
-
-
 def _filled(shape: SessionShape) -> FeatureStore:
     store = FeatureStore(shape.feature_spec())
-    for index, joint in enumerate(JOINTS):
-        store.write(joint_feature_key(OBSERVATION_PREFIX, "follower", joint), float(index), timestamp=7.0)
+    store.write(STATE_KEY, [float(index) for index in range(len(JOINTS))], timestamp=7.0)
     for camera in shape.cameras:
         store.write(image_feature_key(camera.key), np.zeros(camera.shape, np.uint8), timestamp=7.0)
     return store
@@ -76,8 +71,7 @@ class TestWhatItCommands:
 
         control.tick()
 
-        assert store.read(_action_key("shoulder_pan")).value == 1.0
-        assert store.read(_action_key("gripper")).value == 2.0
+        assert list(store.read(ACTION_KEY).value) == pytest.approx([1.0, 2.0])
 
     def test_the_action_carries_the_observations_time(self) -> None:
         """The gap between them is the period the robot interpolates across."""
@@ -86,7 +80,7 @@ class TestWhatItCommands:
 
         ModelControl(_FakeModel(), store, shape, hz=10.0).tick()
 
-        assert store.read(_action_key("gripper")).timestamp == 7.0
+        assert store.read(ACTION_KEY).timestamp == 7.0
 
     def test_nothing_is_written_before_the_first_inference(self) -> None:
         shape = _shape()
@@ -94,20 +88,20 @@ class TestWhatItCommands:
 
         ModelControl(_FakeModel(), store, shape, hz=10.0)
 
-        assert store.read(_action_key("gripper")) is None
+        assert store.read(ACTION_KEY) is None
 
     def test_an_incomplete_observation_is_skipped(self) -> None:
         """A policy fed a default where an image belongs produces a confident
         action from data that was never measured."""
         shape = _shape()
         store = FeatureStore(shape.feature_spec())
-        store.write(joint_feature_key(OBSERVATION_PREFIX, "follower", "gripper"), 1.0, timestamp=1.0)
+        store.write(STATE_KEY, [1.0, 1.0], timestamp=1.0)
         model = _FakeModel()
 
         ModelControl(model, store, shape, hz=10.0).tick()
 
         assert model.observations == []
-        assert store.read(_action_key("gripper")) is None
+        assert store.read(ACTION_KEY) is None
 
     def test_it_is_named_for_a_client_to_show(self) -> None:
         shape = _shape()
@@ -181,7 +175,7 @@ class TestItInfersOffTheRobotsThread:
             await asyncio.sleep(0.02)
             start = asyncio.get_running_loop().time()
             for _ in range(50):
-                store.snapshot((_action_key("gripper"),))
+                store.snapshot((ACTION_KEY,))
             elapsed = asyncio.get_running_loop().time() - start
 
         assert elapsed < 0.05, f"reading the store blocked for {elapsed:.3f}s"

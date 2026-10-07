@@ -91,9 +91,10 @@ const sourceOf = (control: ControlConfig | null): FollowerSource => {
     return 'hold';
 };
 
-/** One feature's current value, as the runtime streams it. */
+/** One feature's current vector, as the runtime streams it. */
 interface Sample {
-    value: number;
+    names: string[];
+    values: number[];
     timestamp: number;
 }
 
@@ -101,23 +102,27 @@ interface Sample {
  * Split the runtime's features into the observation and action maps the pages
  * above expect, keyed by joint.
  *
- * The runtime keys features by kind and robot -- ``observation.arm.wrist.pos``
- * -- while these pages index by joint alone, as a recorded dataset does. Only
- * ``driven`` robots are included: a leader's joints carry the same names, so
- * including them would overwrite the arm being watched with the one being held.
+ * A feature is a robot's whole vector with its component names, so this zips
+ * rather than parsing keys -- and the order is the driver's, which is the
+ * order that matters. Only `driven` robots are included: a leader's joints
+ * carry the same names, so including them would overwrite the arm being
+ * watched with the one being held.
  */
 const splitFeatures = (data: Record<string, Sample>, driven: Set<string>) => {
     const observation: Record<string, number> = {};
     const actions: Record<string, number> = {};
     for (const [key, sample] of Object.entries(data)) {
-        const parts = key.split('.');
-        if (parts.length < 4 || !driven.has(parts[1])) {
+        const [kind, robot] = key.split('.');
+        if (!driven.has(robot)) {
             continue;
         }
-        const target = parts[0] === 'action' ? actions : parts[0] === 'observation' ? observation : undefined;
-        if (target !== undefined) {
-            target[parts.slice(2).join('.')] = sample.value;
+        const target = kind === 'action' ? actions : kind === 'observation' ? observation : undefined;
+        if (target === undefined) {
+            continue;
         }
+        sample.names.forEach((name, index) => {
+            target[`${name}.pos`] = sample.values[index];
+        });
     }
     return { observation, actions };
 };
@@ -257,7 +262,7 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
             }
             if (props.dataset) {
                 loadDataset.mutate(props.dataset);
-                setFollowerSource.mutate('teleop');
+                //setFollowerSource.mutate('teleop');
             }
         })();
     };

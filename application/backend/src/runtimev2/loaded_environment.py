@@ -310,7 +310,3 @@ class LoadedEnvironment(ManagedLifecycle["LoadedEnvironment"]):
         follower = followers[0]
         check_pairing(leader.joint_names, follower.joint_names)
         return leader, follower
-
-    def action_keys_for(self, shape: RobotShape) -> tuple[str, ...]:
-        """The action features a control would write to drive ``shape``."""
-        return self._robots[shape.key].action_keys

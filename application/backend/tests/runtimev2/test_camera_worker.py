@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pytest
 
-from runtimev2.features import FeatureSpec, camera_features, image_feature_key
+from runtimev2.features import STATE_KEY, FeatureSpec, camera_features, image_feature_key
 from runtimev2.store import FeatureStore
 from runtimev2.workers.camera import CameraWorker, connect_with_retry
 
@@ -177,15 +177,15 @@ class TestDeclaredResolutionLeads:
             worker.tick()
 
     def test_a_non_image_feature_is_refused(self) -> None:
-        from runtimev2.features import FeatureSpec, joint_feature_key, robot_features
+        from runtimev2.features import FeatureSpec, robot_features
 
-        store = FeatureStore(FeatureSpec.build(robot_features("follower", ["gripper"])))
+        store = FeatureStore(FeatureSpec.build(robot_features(["gripper"])))
 
         with pytest.raises(ValueError, match="not an image feature"):
             CameraWorker(
                 _FakeCamera,
                 store,
-                key=joint_feature_key("observation", "follower", "gripper"),
+                key=STATE_KEY,
                 hz=30.0,
             )
 

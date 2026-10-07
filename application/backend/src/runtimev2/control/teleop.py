@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from runtimev2.control.base import ControlAction, ControlAlgorithm
-from runtimev2.features import OBSERVATION_PREFIX, joint_feature_key
+from runtimev2.control.base import ControlAlgorithm
+from runtimev2.features import ACTION_KEY, OBSERVATION_PREFIX, robot_feature_key
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -50,28 +50,23 @@ class TeleopControl(ControlAlgorithm):
         self,
         leader: LeaderDevice,
         store: SessionStore,
-        action_keys: Sequence[str],
+        follower_joints: Sequence[str],
         *,
         hz: float,
     ) -> None:
-        check_pairing(leader.joint_names, action_keys)
-        super().__init__(store, action_keys, name="teleop", hz=hz)
+        check_pairing(leader.joint_names, follower_joints)
+        super().__init__(store, name="teleop", hz=hz)
         self._leader = leader
-        self._observation_keys = [
-            joint_feature_key(OBSERVATION_PREFIX, leader.key, joint) for joint in leader.joint_names
-        ]
+        self._leader_key = robot_feature_key(OBSERVATION_PREFIX, leader.key)
 
-    def compute(self) -> ControlAction:
+    def tick(self) -> None:
         """Read the leader, publish what it said, and command the same.
 
         One serial transaction per tick, on this control's own thread, so the
-        robot's loop is never waiting on it.
+        robot's loop is never waiting on it. Both writes carry the leader's own
+        capture time: the gap between readings is the period the robot
+        interpolates across, and the published position is the one the command
+        was derived from.
         """
         values, timestamp = self._leader.read()
-        self._store.write_many(
-            {key: float(value) for key, value in zip(self._observation_keys, values, strict=True)},
-            timestamp=timestamp,
-        )
-        # The leader's own capture time: the gap between readings is the period
-        # the robot interpolates across.
-        return ControlAction(values=values, timestamp=timestamp)
+        self._store.write_many({self._leader_key: values, ACTION_KEY: values}, timestamp=timestamp)

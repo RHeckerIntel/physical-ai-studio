@@ -13,7 +13,7 @@ import pytest
 from loguru import logger
 
 from runtimev2.environment import RobotShape
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, FeatureSpec, joint_feature_key, robot_features
+from runtimev2.features import ACTION_KEY, STATE_KEY, FeatureSpec, robot_features
 from runtimev2.store import FeatureStore
 from runtimev2.workers.loop import run_at
 from runtimev2.workers.robot import RobotWorker
@@ -89,7 +89,7 @@ def _setup(*, clock: _Clock | None = None, seed: bool = True) -> tuple[_FakeRobo
     These tests drive ticks directly rather than through the worker's thread.
     """
     robot = _FakeRobot()
-    store = FeatureStore(FeatureSpec.build(robot_features("follower", JOINTS)))
+    store = FeatureStore(FeatureSpec.build(robot_features(JOINTS)))
     worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0, clock=clock or _Clock())
     robot.connect()
     worker._connected = True
@@ -98,27 +98,23 @@ def _setup(*, clock: _Clock | None = None, seed: bool = True) -> tuple[_FakeRobo
     return robot, store, worker
 
 
-def _action_key(joint: str) -> str:
-    return joint_feature_key(ACTION_PREFIX, "follower", joint)
+OBSERVATION_KEY = STATE_KEY
 
 
 def _write_action(store: FeatureStore, values: list[float], timestamp: float) -> None:
     """Write what a control would, without running one."""
-    store.write_many(
-        {_action_key(joint): value for joint, value in zip(JOINTS, values, strict=True)},
-        timestamp=timestamp,
-    )
+    store.write(ACTION_KEY, values, timestamp=timestamp)
 
 
 class TestObservation:
-    def test_a_tick_publishes_every_joint(self) -> None:
-        _robot, store, worker = _setup()
+    def test_a_tick_publishes_the_whole_vector(self) -> None:
+        robot, store, worker = _setup()
 
         worker.tick()
 
-        shot = store.snapshot(worker.observation_keys)
-        assert len(shot) == len(JOINTS)
-        assert shot[joint_feature_key(OBSERVATION_PREFIX, "follower", "shoulder_pan")].value == pytest.approx(0.1)
+        sample = store.read(worker.observation_key)
+        assert sample is not None
+        assert list(sample.value) == pytest.approx(list(robot.positions))
 
     def test_the_robots_own_capture_time_is_kept(self) -> None:
         """Storing arrival time instead would fold transport delay into the reading."""
@@ -127,7 +123,7 @@ class TestObservation:
 
         worker.tick()
 
-        sample = store.read(joint_feature_key(OBSERVATION_PREFIX, "follower", "gripper"))
+        sample = store.read(STATE_KEY)
         assert sample is not None
         assert sample.timestamp == 1234.5
 
@@ -138,8 +134,7 @@ class TestHoldingOnConnect:
     def test_connecting_seeds_the_action_with_the_measured_position(self) -> None:
         robot, store, _worker = _setup()
 
-        for joint, position in zip(JOINTS, robot.positions, strict=True):
-            assert store.read(_action_key(joint)).value == pytest.approx(float(position))
+        assert list(store.read(ACTION_KEY).value) == pytest.approx(list(robot.positions))
 
     def test_the_first_command_is_where_the_arm_already_is(self) -> None:
         """Which is what makes loading safe with no switch to forget."""
@@ -167,14 +162,19 @@ class TestHoldingOnConnect:
 
         assert robot.sent == []
 
-    def test_a_partially_written_action_is_not_sent(self) -> None:
-        """There is no safe filler for a joint nothing has spoken for."""
+    def test_a_partial_action_cannot_be_expressed(self) -> None:
+        """What used to need a guard is now structural: an action is one vector,
+        so there is no state where some joints have been spoken for and others
+        have not. The worker drives on the whole thing or not at all."""
         robot, store, worker = _setup(seed=False)
-        store.write(_action_key("shoulder_pan"), 1.0, timestamp=1.0)
 
         worker.tick()
+        assert robot.sent == [], "nothing written yet, so nothing commanded"
 
-        assert robot.sent == []
+        _write_action(store, [1.0, 2.0, 3.0], 1.0)
+        worker.tick()
+
+        np.testing.assert_allclose(robot.sent[-1], [1.0, 2.0, 3.0])
 
 
 class TestDriving:
@@ -193,7 +193,7 @@ class TestDriving:
 
         worker.tick()
 
-        assert len(store.snapshot(worker.observation_keys)) == len(JOINTS)
+        assert store.read(OBSERVATION_KEY) is not None
 
 
 class TestRamping:
@@ -347,13 +347,13 @@ class TestAsAWorker:
 
     async def test_entering_connects_and_leaving_disconnects(self) -> None:
         robot = _FakeRobot()
-        store = FeatureStore(FeatureSpec.build(robot_features("follower", JOINTS)))
+        store = FeatureStore(FeatureSpec.build(robot_features(JOINTS)))
         worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0)
 
         async with worker:
             assert robot.connected
             await asyncio.sleep(0.1)
-            assert len(store.snapshot(worker.observation_keys)) == len(JOINTS), "the worker's own thread never ticked"
+            assert store.read(OBSERVATION_KEY) is not None, "the worker's own thread never ticked"
 
         assert not robot.connected
         assert robot.disconnects == 1
@@ -363,7 +363,7 @@ class TestAsAWorker:
         send joint values to the wrong joints while the arm is live."""
         robot = _FakeRobot()
         robot.joint_names = list(reversed(JOINTS))
-        store = FeatureStore(FeatureSpec.build(robot_features("follower", JOINTS)))
+        store = FeatureStore(FeatureSpec.build(robot_features(JOINTS)))
         worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0)
 
         with pytest.raises(RuntimeError, match="once connected"):
@@ -374,7 +374,7 @@ class TestAsAWorker:
 
     async def test_ticking_outside_acquire_is_refused(self) -> None:
         robot = _FakeRobot()
-        store = FeatureStore(FeatureSpec.build(robot_features("follower", JOINTS)))
+        store = FeatureStore(FeatureSpec.build(robot_features(JOINTS)))
         worker = RobotWorker(robot, store, shape=SHAPE, hz=100.0)
 
         with pytest.raises(RuntimeError, match="not connected"):

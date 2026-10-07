@@ -33,6 +33,14 @@ class TeleopControlConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MoveControlConfig:
+    time: float
+    position: list[float]
+    hz: float = 30
+    kind: ClassVar[str] = "move"
+
+
+@dataclass(frozen=True, slots=True)
 class ModelControlConfig:
     """Drive the follower from a loaded policy."""
 
@@ -49,11 +57,12 @@ class ModelControlConfig:
     kind: ClassVar[str] = "model"
 
 
-ControlConfig = TeleopControlConfig | ModelControlConfig
+ControlConfig = TeleopControlConfig | ModelControlConfig | MoveControlConfig
 
-_BY_KIND: dict[str, type[TeleopControlConfig | ModelControlConfig]] = {
+_BY_KIND: dict[str, type[TeleopControlConfig | ModelControlConfig | MoveControlConfig]] = {
     TeleopControlConfig.kind: TeleopControlConfig,
     ModelControlConfig.kind: ModelControlConfig,
+    MoveControlConfig.kind: MoveControlConfig,
 }
 
 

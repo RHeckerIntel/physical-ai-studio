@@ -20,13 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from runtimev2.features import (
-    ACTION_PREFIX,
-    OBSERVATION_PREFIX,
-    image_feature_key,
-    joint_feature_key,
-    sanitize_dataset_camera_name,
-)
+from runtimev2.features import ACTION_KEY, STATE_KEY, image_feature_key, sanitize_dataset_camera_name
 from runtimev2.workers.base import ThreadedWorker
 
 if TYPE_CHECKING:
@@ -58,12 +52,11 @@ class DatasetWorker(ThreadedWorker):
         self._recording = recording
         follower = shape.robots[0]
         # Resolved once: store key -> dataset key, for both halves of a row.
-        self._observations = {
-            joint_feature_key(OBSERVATION_PREFIX, follower.key, joint): f"{joint}.pos" for joint in follower.joint_names
-        }
-        self._actions = {
-            joint_feature_key(ACTION_PREFIX, follower.key, joint): f"{joint}.pos" for joint in follower.joint_names
-        }
+        # A dataset's columns are the joint names with no robot prefix, in the
+        # same order the feature's vector carries them.
+        self._observation_key = STATE_KEY
+        self._action_key = ACTION_KEY
+        self._columns = tuple(f"{joint}.pos" for joint in follower.joint_names)
         self._images = {
             image_feature_key(camera.key): sanitize_dataset_camera_name(camera.name) for camera in shape.cameras
         }
@@ -87,18 +80,25 @@ class DatasetWorker(ThreadedWorker):
         """
         if not self._recording.is_recording:
             return
-        wanted = (*self._observations, *self._actions, *self._images)
+        wanted = (self._observation_key, self._action_key, *self._images)
         snapshot = self._store.snapshot(wanted)
         if len(snapshot) != len(wanted):
             self._skipped += 1
             return
 
-        observation: dict[str, Any] = {
-            dataset_key: snapshot[store_key].value for store_key, dataset_key in self._observations.items()
-        }
+        observation: dict[str, Any] = self._unpack(snapshot[self._observation_key].value)
         for store_key, dataset_key in self._images.items():
             # Copied: the store keeps handing out the same array until the next
             # frame, and the writer must not see it change underneath.
             observation[dataset_key] = snapshot[store_key].value.copy()
-        action = {dataset_key: snapshot[store_key].value for store_key, dataset_key in self._actions.items()}
+        action = self._unpack(snapshot[self._action_key].value)
         self._recording.add_frame(observation, action)
+
+    def _unpack(self, vector: Any) -> dict[str, float]:  # an ndarray
+        """Spread a robot's vector across the columns a dataset names.
+
+        The only place the packing is undone, and it is undone here because
+        LeRobot takes a column per joint. The feature's order is the driver's,
+        so zipping against the column names cannot misalign.
+        """
+        return {column: float(value) for column, value in zip(self._columns, vector, strict=True)}

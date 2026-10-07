@@ -113,16 +113,23 @@ def _error_message(exc: Exception) -> dict[str, Any]:
 
 
 def _observation_message(store: SessionStore) -> dict[str, Any]:
-    """Send every scalar feature the store currently holds.
+    """Send every vector feature the store currently holds.
 
-    Images are left out: they are not in the store yet, and when they are they
-    will not travel as JSON.
+    Each carries its component names, so a client reads a robot's joints by
+    zipping rather than by parsing keys -- and gets them in the order the
+    driver reports them, which is the order that matters.
+
+    Frames are left out: they would not travel as JSON.
     """
     snapshot = store.snapshot(store.spec.keys())
     return {
         "event": "observation",
         "data": {
-            key: {"value": sample.value, "timestamp": sample.timestamp}
+            key: {
+                "names": list(store.spec[key].names),
+                "values": [float(value) for value in sample.value],
+                "timestamp": sample.timestamp,
+            }
             for key, sample in snapshot.items()
             if not store.spec[key].is_image
         },

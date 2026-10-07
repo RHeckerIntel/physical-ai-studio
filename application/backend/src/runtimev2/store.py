@@ -35,7 +35,8 @@ class Sample:
     """One feature's value, as of when its producer measured it.
 
     Attributes:
-        value: A float for a joint, an array for an image.
+        value: The feature's vector -- a robot's joint positions in driver
+            order, or a camera frame.
         timestamp: The producer's ``time.monotonic()`` at the moment of
             measurement -- not when it reached the store, which would fold
             transport delay into the reading.

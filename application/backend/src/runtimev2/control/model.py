@@ -19,14 +19,8 @@ import numpy as np
 from loguru import logger
 from physicalai.inference.constants import IMAGES, STATE, TASK
 
-from runtimev2.control.base import ControlAction, ControlAlgorithm
-from runtimev2.features import (
-    ACTION_PREFIX,
-    OBSERVATION_PREFIX,
-    image_feature_key,
-    joint_feature_key,
-    sanitize_dataset_camera_name,
-)
+from runtimev2.control.base import ControlAlgorithm
+from runtimev2.features import ACTION_KEY, STATE_KEY, image_feature_key, sanitize_dataset_camera_name
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -77,18 +71,9 @@ class ModelControl(ControlAlgorithm):
         hz: float,
         task: str | None = None,
     ) -> None:
-        follower = shape.robots[0]
-        super().__init__(
-            store,
-            [joint_feature_key(ACTION_PREFIX, follower.key, joint) for joint in follower.joint_names],
-            name="model",
-            hz=hz,
-        )
+        super().__init__(store, name="model", hz=hz)
         self._model = model
         self._task = task
-        # The order the model's state vector was trained in, which is the
-        # shape's joint order.
-        self._state_keys = [joint_feature_key(OBSERVATION_PREFIX, follower.key, j) for j in follower.joint_names]
         # Image inputs use the dataset's camera naming, because that is what the
         # model was trained against.
         self._images = {
@@ -118,28 +103,30 @@ class ModelControl(ControlAlgorithm):
             if self._skipped:
                 logger.info("Inference skipped {} ticks for want of a complete observation", self._skipped)
 
-    def compute(self) -> ControlAction | None:
-        """Infer one action from the store's observations.
+    def tick(self) -> None:
+        """Infer one action from the store's observations and command it.
 
         An incomplete observation is skipped, not padded: a policy fed a default
         where a measurement belongs answers confidently from data it never saw.
         """
-        wanted = (*self._state_keys, *self._images)
+        wanted = (STATE_KEY, *self._images)
         snapshot = self._store.snapshot(wanted)
         if len(snapshot) != len(wanted):
             self._skipped += 1
-            return None
+            return
         values = self._model.select_action(self._observation(snapshot))
-        return ControlAction(
-            values=np.asarray(values, dtype=np.float32),
+        self._store.write(
+            ACTION_KEY,
+            np.asarray(values, dtype=np.float32),
             # The observation's time, not now, so a reader can see how old the
             # measurement behind a command was.
-            timestamp=max(snapshot[key].timestamp for key in self._state_keys),
+            timestamp=snapshot[STATE_KEY].timestamp,
         )
 
     def _observation(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         """Assemble the model's input in the shape it was exported with."""
-        state = np.array([[snapshot[key].value for key in self._state_keys]], dtype=np.float32)
+        # Already in the driver's order, which is the order it was trained in.
+        state = np.asarray(snapshot[STATE_KEY].value, dtype=np.float32)[np.newaxis]
         observation: dict[str, Any] = {STATE: state}
         images = {name: snapshot[key].value[np.newaxis] for key, name in self._images.items()}
         if len(images) > 1:

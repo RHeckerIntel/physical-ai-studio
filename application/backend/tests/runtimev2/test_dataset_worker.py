@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from runtimev2.environment import CameraShape, RobotShape, SessionShape
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, image_feature_key, joint_feature_key
+from runtimev2.features import ACTION_KEY, STATE_KEY, image_feature_key
 from runtimev2.store import FeatureStore
 from runtimev2.workers.dataset import DatasetWorker
 
@@ -42,9 +42,8 @@ def _store(shape: SessionShape) -> FeatureStore:
 
 
 def _fill(store: FeatureStore, shape: SessionShape, *, value: float = 1.0) -> None:
-    for joint in JOINTS:
-        store.write(joint_feature_key(OBSERVATION_PREFIX, "follower", joint), value, timestamp=1.0)
-        store.write(joint_feature_key(ACTION_PREFIX, "follower", joint), value + 10, timestamp=1.0)
+    store.write(STATE_KEY, [value] * len(JOINTS), timestamp=1.0)
+    store.write(ACTION_KEY, [value + 10] * len(JOINTS), timestamp=1.0)
     for camera in shape.cameras:
         store.write(
             image_feature_key(camera.key),
@@ -116,19 +115,18 @@ class TestWhenNotToWrite:
         shape = _shape()
         store = _store(shape)
         recording = _Recording()
-        store.write(joint_feature_key(OBSERVATION_PREFIX, "follower", "gripper"), 1.0, timestamp=1.0)
+        store.write(STATE_KEY, [1.0] * len(JOINTS), timestamp=1.0)
 
         _worker(store, recording, shape).tick()
 
-        assert recording.frames == []
+        assert recording.frames == [], "no action written, so no row"
 
     def test_a_missing_camera_frame_also_skips(self) -> None:
         shape = _shape()
         store = _store(shape)
         recording = _Recording()
-        for joint in JOINTS:
-            store.write(joint_feature_key(OBSERVATION_PREFIX, "follower", joint), 1.0, timestamp=1.0)
-            store.write(joint_feature_key(ACTION_PREFIX, "follower", joint), 1.0, timestamp=1.0)
+        store.write(STATE_KEY, [1.0] * len(JOINTS), timestamp=1.0)
+        store.write(ACTION_KEY, [1.0] * len(JOINTS), timestamp=1.0)
 
         _worker(store, recording, shape).tick()
 

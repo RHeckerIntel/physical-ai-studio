@@ -10,6 +10,7 @@ import pytest
 
 from runtimev2.devices import from_environment
 from runtimev2.environment import describe_devices
+from runtimev2.features import ACTION_KEY, STATE_KEY
 
 JOINTS = ("shoulder_pan", "elbow_flex", "gripper")
 
@@ -120,8 +121,8 @@ async def test_a_teleoperator_is_described_as_a_leader() -> None:
     assert [leader.key for leader in shape.leaders] == ["leader"]
     # No action slots for a leader: nothing commands one.
     spec = shape.feature_spec()
-    assert "action.leader.shoulder_pan.pos" not in spec
-    assert "observation.leader.shoulder_pan.pos" in spec
+    assert "action.leader" not in spec
+    assert "observation.leader" in spec
 
 
 async def test_a_teleoperator_of_none_adds_nothing() -> None:
@@ -168,6 +169,7 @@ async def test_the_shape_projects_onto_the_feature_spec() -> None:
 
     spec = (await describe_devices(from_environment(environment), _Factory())).feature_spec()
 
-    assert "observation.follower.gripper.pos" in spec
-    assert "action.follower.gripper.pos" in spec
+    assert STATE_KEY in spec
+    assert ACTION_KEY in spec
+    assert spec[STATE_KEY].names == ("shoulder_pan", "elbow_flex", "gripper")
     assert spec["observation.images.overhead"].shape == (480, 640, 3)

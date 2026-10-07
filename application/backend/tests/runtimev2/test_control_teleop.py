@@ -9,15 +9,15 @@ import pytest
 
 from runtimev2.control.teleop import JointMappingError, TeleopControl, check_pairing
 from runtimev2.environment import LeaderShape, RobotShape, SessionShape
-from runtimev2.features import ACTION_PREFIX, OBSERVATION_PREFIX, joint_feature_key
+from runtimev2.features import ACTION_KEY, OBSERVATION_PREFIX, robot_feature_key
 from runtimev2.store import FeatureStore
 
 JOINTS = ("shoulder_pan", "gripper")
-ACTION_KEYS = tuple(joint_feature_key(ACTION_PREFIX, "follower", joint) for joint in JOINTS)
+LEADER_KEY = robot_feature_key(OBSERVATION_PREFIX, "leader")
 
 
 def _control(leader: _FakeLeader, store: FeatureStore) -> TeleopControl:
-    return TeleopControl(leader, store, ACTION_KEYS, hz=100.0)
+    return TeleopControl(leader, store, JOINTS, hz=100.0)
 
 
 class _FakeLeader:
@@ -45,26 +45,26 @@ def _store() -> FeatureStore:
 
 
 class TestWhatItCommands:
-    def test_it_offers_the_leaders_position(self) -> None:
-        control = _control(_FakeLeader(), _store())
+    def test_it_commands_the_leaders_position(self) -> None:
+        store = _store()
+        _control(_FakeLeader(), store).tick()
 
-        action = control.compute()
-
-        np.testing.assert_allclose(action.values, [0.0, 1.0])
+        np.testing.assert_allclose(store.read(ACTION_KEY).value, [0.0, 1.0])
 
     def test_it_carries_the_leaders_capture_time(self) -> None:
         """Which is what makes the follower command once per leader reading."""
-        control = _control(_FakeLeader(), _store())
+        store = _store()
+        _control(_FakeLeader(), store).tick()
 
-        assert control.compute().timestamp == 42.0
+        assert store.read(ACTION_KEY).timestamp == 42.0
 
     def test_it_reads_the_device_rather_than_the_store(self) -> None:
         """No clock between reading the leader and producing the command."""
         leader = _FakeLeader()
         control = _control(leader, _store())
 
-        control.compute()
-        control.compute()
+        control.tick()
+        control.tick()
 
         assert leader.reads == 2
 
@@ -77,9 +77,9 @@ class TestWhatItPublishes:
         store = _store()
         control = _control(_FakeLeader(), store)
 
-        control.compute()
+        control.tick()
 
-        assert store.read(joint_feature_key(OBSERVATION_PREFIX, "leader", "gripper")).value == 1.0
+        assert list(store.read(LEADER_KEY).value) == pytest.approx([0.0, 1.0])
 
     def test_a_tick_writes_the_action_features(self) -> None:
         """A control writes; the robot reads. Nothing hands the two together."""
@@ -88,8 +88,8 @@ class TestWhatItPublishes:
 
         control.tick()
 
-        assert store.read(ACTION_KEYS[1]).value == 1.0
-        assert store.read(ACTION_KEYS[1]).timestamp == 42.0
+        assert list(store.read(ACTION_KEY).value) == pytest.approx([0.0, 1.0])
+        assert store.read(ACTION_KEY).timestamp == 42.0
 
     def test_the_published_position_is_the_one_commanded(self) -> None:
         """One read, two uses, so the record and the command cannot disagree."""
@@ -97,11 +97,12 @@ class TestWhatItPublishes:
         leader = _FakeLeader()
         control = _control(leader, store)
 
-        action = control.compute()
-        published = store.read(joint_feature_key(OBSERVATION_PREFIX, "leader", "gripper"))
+        control.tick()
+        published = store.read(LEADER_KEY)
+        commanded = store.read(ACTION_KEY)
 
-        assert published.value == pytest.approx(action.values[1])
-        assert published.timestamp == action.timestamp
+        assert list(published.value) == pytest.approx(list(commanded.value))
+        assert published.timestamp == commanded.timestamp
 
 
 class TestPairing:
@@ -122,9 +123,9 @@ class TestLifecycle:
     async def test_it_writes_from_its_own_thread(self) -> None:
         """Its rate is the leader's, independent of the robot it drives."""
         store = _store()
-        control = TeleopControl(_FakeLeader(), store, ACTION_KEYS, hz=200.0)
+        control = TeleopControl(_FakeLeader(), store, JOINTS, hz=200.0)
 
         async with control:
             await asyncio.sleep(0.05)
 
-        assert store.read(ACTION_KEYS[0]) is not None, "its own thread never wrote"
+        assert store.read(ACTION_KEY) is not None, "its own thread never wrote"

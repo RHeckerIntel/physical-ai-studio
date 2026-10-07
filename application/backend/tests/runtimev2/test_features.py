@@ -5,10 +5,12 @@ from __future__ import annotations
 import pytest
 
 from runtimev2.features import (
+    ACTION_KEY,
+    STATE_KEY,
     FeatureSpec,
     camera_features,
     image_feature_key,
-    joint_feature_key,
+    leader_features,
     robot_features,
     sanitize_name,
 )
@@ -18,20 +20,28 @@ JOINTS = ["shoulder_pan", "elbow_flex", "gripper"]
 
 def _spec() -> FeatureSpec:
     return FeatureSpec.build(
-        robot_features("follower", JOINTS),
+        robot_features(JOINTS),
         camera_features({"overhead": (480, 640, 3), "gripper": (480, 640, 3)}),
     )
 
 
 class TestShape:
-    def test_a_robot_gets_both_kinds_for_every_joint(self) -> None:
-        """A robot that is only read still declares actions, so driving it later is not a shape change."""
-        spec = FeatureSpec.build(robot_features("follower", JOINTS))
+    def test_the_driven_robot_uses_the_well_known_keys(self) -> None:
+        """Not one feature per joint, and not keyed by robot: a session drives
+        one, so a control can assume both keys exist."""
+        spec = FeatureSpec.build(robot_features(JOINTS))
 
-        assert spec.keys("observation") == tuple(
-            sorted(joint_feature_key("observation", "follower", joint) for joint in JOINTS)
-        )
-        assert spec.keys("action") == tuple(sorted(joint_feature_key("action", "follower", joint) for joint in JOINTS))
+        assert spec.keys("observation") == (STATE_KEY,)
+        assert spec.keys("action") == (ACTION_KEY,)
+
+    def test_a_vector_carries_its_joint_names_in_driver_order(self) -> None:
+        """Order is the thing a dataset column and ``send_action`` both rely on."""
+        spec = FeatureSpec.build(robot_features(JOINTS))
+        feature = spec[STATE_KEY]
+
+        assert feature.names == tuple(JOINTS)
+        assert feature.shape == (len(JOINTS),)
+        assert not feature.is_image
 
     def test_cameras_are_observations_with_a_shape(self) -> None:
         spec = FeatureSpec.build(camera_features({"overhead": (480, 640, 3)}))
@@ -42,21 +52,22 @@ class TestShape:
         assert feature.dtype == "uint8"
         assert feature.is_image
 
-    def test_two_robots_do_not_collide(self) -> None:
-        spec = FeatureSpec.build(robot_features("leader", JOINTS), robot_features("follower", JOINTS))
+    def test_a_leader_does_not_collide_with_the_driven_robot(self) -> None:
+        """A leader is keyed by name; the driven robot has the singular keys."""
+        spec = FeatureSpec.build(robot_features(JOINTS), leader_features("leader", JOINTS))
 
-        assert len(spec.keys()) == 4 * len(JOINTS)
+        assert set(spec.keys()) == {STATE_KEY, ACTION_KEY, "observation.leader"}
 
     def test_the_order_is_reproducible(self) -> None:
         """A dataset's columns are matched by name, but a stable order keeps diffs readable."""
-        first = FeatureSpec.build(robot_features("follower", JOINTS))
-        second = FeatureSpec.build(robot_features("follower", list(reversed(JOINTS))))
+        first = FeatureSpec.build(robot_features(JOINTS))
+        second = FeatureSpec.build(robot_features(list(reversed(JOINTS))))
 
         assert first.keys() == second.keys()
 
     def test_duplicate_keys_are_rejected(self) -> None:
         with pytest.raises(ValueError, match="duplicate feature key"):
-            FeatureSpec.build(robot_features("follower", JOINTS), robot_features("follower", JOINTS))
+            FeatureSpec.build(robot_features(JOINTS), robot_features(JOINTS))
 
 
 class TestSanitize:

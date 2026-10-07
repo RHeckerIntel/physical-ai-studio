@@ -47,14 +47,20 @@ export const parseRuntimeV2Message = (payload: unknown): ParsedRuntimeV2Message 
     }
 
     if (message.event === 'observation' && typeof message.data === 'object' && message.data !== null) {
-        const entries = Object.entries(message.data as Record<string, { value: number; timestamp: number }>);
+        // A feature is a robot's whole vector with its component names, so a
+        // joint is addressed by zipping rather than by parsing its key.
+        const entries = Object.entries(
+            message.data as Record<string, { names: string[]; values: number[]; timestamp: number }>
+        );
         return {
             type: 'observation',
-            features: entries.map(([key, sample]) => ({
-                key,
-                value: Number(sample.value),
-                timestamp: Number(sample.timestamp),
-            })),
+            features: entries.flatMap(([key, sample]) =>
+                sample.names.map((name, index) => ({
+                    key: `${key}.${name}.pos`,
+                    value: Number(sample.values[index]),
+                    timestamp: Number(sample.timestamp),
+                }))
+            ),
         };
     }
 
