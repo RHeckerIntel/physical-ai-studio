@@ -449,6 +449,7 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
         the arms are let go.
         """
         await self._release_control()
+        await asyncio.to_thread(self._move_to_home)
         stack, self._stack = self._stack, None
         loaded, self._loaded = self._loaded, None
         if stack is None:
@@ -457,6 +458,33 @@ class RuntimeSession(ManagedLifecycle["RuntimeSession"]):
         # is loaded rather than handed devices on their way out.
         logger.info("Unloading {}", loaded.name if loaded else "environment")
         await stack.aclose()
+
+    def _move_to_home(self):
+        print("moving to home")
+        from runtimev2.dataset_layout import STATE_KEY, ACTION_KEY
+        import numpy as np
+        import time
+        goal_position = np.array([ 0,  -6,  -8,    5,  20,   0, -8,  60,
+                                    0,  -6,  -8,    5,  20,   0, -8,  60 ], dtype=np.float32)
+
+        print(f"{goal_position}")
+        if self._loaded:
+            sample = self._loaded.store.read(STATE_KEY)
+            if sample is None:
+                return
+            start_position = np.asarray(sample.value, dtype=np.float32)
+            start_time = time.monotonic()
+            print(f"{start_position}")
+            while True:
+                timestamp = time.monotonic()
+                if timestamp - start_time > 3:
+                    return
+                fraction = (timestamp - start_time) / 3
+                values = start_position + (goal_position - start_position) * np.float32(fraction)
+                self._loaded.store.write(ACTION_KEY, values, timestamp=timestamp)
+                time.sleep(1 / 30)
+
+
 
     @asynccontextmanager
     async def lifecycle(self) -> AsyncGenerator[RuntimeSession]:

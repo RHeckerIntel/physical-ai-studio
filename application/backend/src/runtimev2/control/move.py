@@ -27,6 +27,7 @@ class MoveControl(ControlAlgorithm):
             raise RuntimeError("the robot has not been read yet")
         self.start_position = np.asarray(sample.value, dtype=np.float32)
         self.start_time = time.monotonic()
+        self.done = False
         print(f"goal_time: {goal_time}")
         print(f"goal_position: {goal_time}")
 
@@ -41,3 +42,5 @@ class MoveControl(ControlAlgorithm):
             values = self.start_position + (self.goal_position - self.start_position) * np.float32(fraction)
             print(values)
             self._store.write(ACTION_KEY, values, timestamp=timestamp)
+        else:
+            self.done = True

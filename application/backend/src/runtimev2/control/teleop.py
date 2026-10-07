@@ -10,6 +10,9 @@ value the command was derived from rather than a separately-timed one.
 """
 
 from __future__ import annotations
+import time
+import numpy as np
+from runtimev2.dataset_layout import STATE_KEY
 
 from typing import TYPE_CHECKING
 
@@ -59,6 +62,14 @@ class TeleopControl(ControlAlgorithm):
         self._leader = leader
         self._leader_key = robot_feature_key(OBSERVATION_PREFIX, leader.key)
 
+
+        sample = self._store.read(STATE_KEY)
+        if sample is None:
+            raise RuntimeError("the robot has not been read yet")
+        self.start_position = np.asarray(sample.value, dtype=np.float32)
+        self.start_time = time.monotonic()
+        self.smooth_entrance_time = 3
+
     def tick(self) -> None:
         """Read the leader, publish what it said, and command the same.
 
@@ -69,4 +80,13 @@ class TeleopControl(ControlAlgorithm):
         was derived from.
         """
         values, timestamp = self._leader.read()
-        self._store.write_many({self._leader_key: values, ACTION_KEY: values}, timestamp=timestamp)
+        if timestamp - self.start_time < self.smooth_entrance_time:
+
+            sample = self._store.read(STATE_KEY)
+            if sample is None:
+                return
+            fraction = (timestamp - self.start_time) / self.smooth_entrance_time
+            values = self.start_position + (values - self.start_position) * np.float32(fraction)
+            self._store.write_many({self._leader_key: values, ACTION_KEY: values}, timestamp=timestamp)
+        else:
+            self._store.write_many({self._leader_key: values, ACTION_KEY: values}, timestamp=timestamp)

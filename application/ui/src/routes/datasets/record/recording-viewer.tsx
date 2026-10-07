@@ -4,6 +4,7 @@ import {
     Button,
     ButtonGroup,
     ComboBox,
+    Switch,
     Flex,
     Form,
     Heading,
@@ -30,6 +31,7 @@ export const RecordingViewer = () => {
         state,
         startEpisode,
         discardEpisode,
+        setFollowerSource,
         saveEpisode,
         readyForRecording,
         environment,
@@ -48,15 +50,26 @@ export const RecordingViewer = () => {
     const { data: settings } = $api.useSuspenseQuery('get', '/api/settings');
     const bindings = getEffectiveBindings(settings.hotkeys.bindings);
 
+    const toggleTeleop = () => {
+        console.log("Hello?!")
+        setFollowerSource.mutate(state.follower_source === "teleop" ? 'hold' : 'teleop')
+    }
+
     useHotkey(bindings['recording.start_episode'], () => startEpisode.mutate(task), !state.is_recording && task !== '');
     useHotkey(
-        bindings['recording.accept_episode'],
-        () => saveEpisode.mutate(),
-        state.is_recording && !saveEpisode.isPending
+        bindings['recording.toggle_teleoperation'],
+        toggleTeleop,
+        true
     );
     useHotkey(
         bindings['recording.discard_episode'],
         () => discardEpisode.mutate(),
+        state.is_recording && !saveEpisode.isPending
+    );
+
+    useHotkey(
+        bindings['recording.accept_episode'],
+        () => saveEpisode.mutate(),
         state.is_recording && !saveEpisode.isPending
     );
 
@@ -108,6 +121,14 @@ export const RecordingViewer = () => {
                         >
                             <Item key={dataset.default_task}>{dataset.default_task}</Item>
                         </ComboBox>
+
+                        <Switch
+                            isEmphasized
+                            isSelected={state.follower_source === "teleop"}
+                            onChange={toggleTeleop}
+                        >
+                            Teleoperate
+                        </Switch>
                         {state.is_recording ? (
                             <ButtonGroup>
                                 <Button

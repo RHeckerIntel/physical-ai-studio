@@ -1,4 +1,4 @@
-export type HotkeyActionId = 'recording.start_episode' | 'recording.accept_episode' | 'recording.discard_episode';
+export type HotkeyActionId = 'recording.start_episode' | 'recording.accept_episode' | 'recording.discard_episode' | 'recording.toggle_teleoperation';
 
 type HotkeyActionDefinition = {
     label: string;
@@ -7,6 +7,11 @@ type HotkeyActionDefinition = {
 };
 
 export const HOTKEY_ACTIONS: Record<HotkeyActionId, HotkeyActionDefinition> = {
+    'recording.toggle_teleoperation': {
+        label: 'Toggle Teleoperation',
+        scope: 'Recording',
+        defaultCombo: 'ArrowUp',
+    },
     'recording.start_episode': {
         label: 'Start episode',
         scope: 'Recording',
