@@ -10,6 +10,7 @@ from loguru import logger
 from core.logging import setup_logging, setup_uvicorn_logging
 from core.security import get_ssh_feature_availability
 from db import get_async_db_session_ctx
+from runtime_session.store import sweep_stale_blocks
 from schemas.remote_trainer import RemoteTrainerConnectionMode
 from services import remote_trainer_tunnel_manager
 from services.camera_claims import CameraClaimRegistry
@@ -98,6 +99,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     logger.info(f"Starting {settings.app_name} application...")
     ensure_spawn_start_method()
+    # No session is live yet, so any session block in shared memory is left over from a crash.
+    sweep_stale_blocks()
     app_scheduler = Scheduler()
     await app_scheduler.start_workers()
 

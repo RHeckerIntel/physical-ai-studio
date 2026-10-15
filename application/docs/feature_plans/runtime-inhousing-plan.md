@@ -172,22 +172,20 @@ What we have today and what we keep from it:
    ```
    The parent side uses the worker itself as an async context manager. `async with worker:` starts it, waits for `ready`, and re-raises a startup failure. Leaving the block sets `stop`, joins with a timeout, and kills the worker if it is still alive. `RuntimeSession` then holds one `AsyncExitStack` and pushes every worker onto it, which is what "added to the Context of the RuntimeSession" means.
 2. **Processes build their hardware in the child.** The worker object gets pickled, so it carries config only (DB rows or Config dicts), never drivers. `lifecycle()` does the instantiation.
-3. **Environment is a composite context manager, not a worker.** In the sketch, `EnvironmentWorker` has no loop of its own: the robot runs in its own process and the cameras in their own threads. `load_environment` is just an `AsyncExitStack` that enters the follower `RobotWorker`, the optional leader `RobotWorker` and the `CameraWorker`s **in parallel**. That keeps today's parallel connect, and if anything fails to connect, everything already connected is released.
-4. **The Store gets a leader slot.** It stays single-robot: one environment, one robot (see Decisions). Teleop still has to read the leader from somewhere, and the leader runs in its own process, so the store holds an optional `leader_state` next to `state`. HIL will later need a `leader_action` slot as well; we add it when that control arrives.
+3. **Environment is a composite context manager, not a worker.** In the sketch, `EnvironmentWorker` has no loop of its own: the robot runs in its own process and the cameras in their own threads. `load_environment` is just an `AsyncExitStack` that enters the follower `RobotWorker` and the `CameraWorker`s and connects the leader driver, **in parallel**. That keeps today's parallel connect, and if anything fails to connect, everything already connected is released.
+4. **The session owns what is loaded; controls borrow it.** The environment owns the follower `RobotWorker`, the `CameraWorker`s and the leader. A loaded model owns its policy. A control only gets references (`TeleopControl` borrows the leader, `ModelControl` the policy), so creating or stopping a control never connects, disconnects or reloads anything. That matters because control switches often (toggling teleop off sets control to `None`), and some robots reset on disconnect. The leader is loaded as a plain driver: the environment connects it on load and disconnects it on unload, with no worker, no loop and no store slot. A borrowed driver or policy cannot cross a process boundary, so borrowing controls run as `ThreadWorker`s in the session's process.
 
 ## Store design
 
 ```
 FeatureSpec
   joint_names:  tuple[str, ...]          (state and action share them)
-  leader:       bool                     (whether leader_state exists)
   observations: {camera_key: ImageSpec(h, w, c, dtype=uint8)}
   task:         str  (not in shm, see below)
 
 Store (shm, one block per session, name = f"pai-{session_id}")
   state            -> Sample(values, names, timestamp)
   action           -> Sample(values, names, timestamp)
-  leader_state     -> Sample(values, names, timestamp)   (only with a leader)
   observation[cam] -> Sample(frame,  name,  timestamp)
 ```
 
@@ -205,7 +203,7 @@ The joint names come namespaced the way the dataset stores them (e.g. `shoulder_
   - a dataset supplies the state/action names and camera shapes;
   - a model supplies its input features.
 
-  Every later load is checked against the spec with `spec.check_compatible(other) -> list[Mismatch]`. A mismatch raises `FeatureSpecMismatchError` listing each difference, for example "camera `wrist`: dataset 480x640x3, environment 720x1280x3" or "joint names differ at index 3". Once every shape-defining component is unloaded, the store is dropped and the next load creates a fresh one.
+  Every later load is checked against the spec with `spec.check_compatible(other) -> list[Mismatch]`. Compatible means everything the newcomer needs exists: joint names equal and in order, and each of its cameras present with the same shape. Extra cameras in the store are fine. A mismatch raises `FeatureSpecMismatchError` listing each difference, for example "camera `wrist`: dataset 480x640x3, environment 720x1280x3" or "joint names differ at index 3". Once every shape-defining component is unloaded, the store is dropped and the next load creates a fresh one.
 
 ## Event bus (zenoh)
 
@@ -221,10 +219,9 @@ The joint names come namespaced the way the dataset stores them (e.g. `shoulder_
 | Worker | Kind | Rate | Reads | Writes |
 |---|---|---|---|---|
 | `RobotWorker` (follower) | process | robot hz (e.g. 100) | `action` | `state` |
-| `RobotWorker` (leader, optional) | process | robot hz | – (later: `leader_action` for HIL) | `leader_state` |
 | `CameraWorker` | thread (`SharedCamera` already runs its own publisher process) | camera fps | – | `observation[cam]` |
 | `DatasetWorker` | process | dataset fps | full snapshot | LeRobot frames |
-| `Control` (exactly one) | thread or process, by type | its own hz | whatever it needs | `action` |
+| `Control` (exactly one) | thread in the session process (borrows session-owned parts) | its own hz | whatever it needs | `action` |
 
 - **RobotWorker:**
   - On connect it seeds `action` with the measured position, so with no control running the arm holds still.
@@ -237,9 +234,9 @@ The joint names come namespaced the way the dataset stores them (e.g. `shoulder_
   - **Join timeout ≥ 60 s.** Finalizing copies the cache back to the dataset, and killing the process mid-copy loses the dataset. This is the main lesson to carry over from `session.py` today, along with "discard the open episode on teardown".
 - **Controls:**
   - `MoveControl` interpolates from the current state to a target over T and then holds. It is also the right thing to run when switching between controls.
-  - `TeleopControl` copies `leader_state` to `action`.
+  - `TeleopControl` borrows the environment's leader driver, and each tick reads it and writes `action`. Robot-specific subclasses can drive the leader too (set its position, change torque). Stopping it leaves the leader connected.
   - `ReplayControl` plays a loaded dataset's episode into `action` at the dataset fps, writing each frame's timestamp as `start + frame_index / fps`. It needs a loaded dataset and an environment whose spec matches it.
-  - `ModelControl` (process) snapshots the store into an observation, runs inference with `t0 = observation timestamp`, and samples a clock-indexed chunk queue at control hz. This is where the time-based `ActionChunk` work is ported over. Order: sync first, then async with a separate inference thread, then smoothing, and RTC last.
+  - `ModelControl` borrows the loaded policy, snapshots the store into an observation, runs inference with `t0 = observation timestamp`, and samples a clock-indexed chunk queue at control hz. This is where the time-based `ActionChunk` work is ported over. Order: sync first, then async with a separate inference thread, then smoothing, and RTC last. Open for Phase 8: inference then runs in the API process, so measure whether Python-side preprocessing holding the GIL makes the websocket stutter before settling on that.
 - **Switching control:** stop the old control (join), re-seed `action` from the current state, then start the new one. That keeps the one-active-control rule structural instead of arbitrated.
 
 ## RuntimeSession API (asyncio, in the FastAPI process)
@@ -304,7 +301,7 @@ Server → client:
 
 - `state` (JSON, sent on change): what is loaded, which control is active, recording status, episodes recorded, and the store spec, so the UI knows the joint and camera names.
 - `error` (JSON): component, message, error_code, and whether the session survived it. A robot worker dying is fatal to the environment, not to the socket.
-- `observation` (JSON, **~20 Hz**, configurable via `?hz=`): `{timestamp, state: {joint: value}, action: {...}, leader_state: {...}}`, read from the store.
+- `observation` (JSON, **~20 Hz**, configurable via `?hz=`): `{timestamp, state: {joint: value}, action: {...}}`, read from the store.
 - **Camera frames (binary, same 20 Hz tick):** `[u8 key_len][key utf-8][jpeg bytes]`, one message per camera per tick. Only frames newer than the last one sent get re-encoded, so a 15 fps camera isn't encoded 20 times a second. Binary avoids the ~33% base64 overhead.
 
 JPEG encoding runs off the event loop (`asyncio.to_thread`). One sampler task per session reads the store and fans out to the socket.
@@ -370,7 +367,8 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`). One sampler task pe
 2. **One active environment per session, with one robot per environment** until the environment refactor. The robot may have one leader.
 3. **The action timestamp is the time the action should have happened** (usually now). The robot worker sets `goal_time = max(action.timestamp - previous_tick_timestamp, 1/hz)`.
 4. **A loaded dataset decides the store shape**, just as an environment or model would. Replaying episodes is a Control (`ReplayControl`).
-5. **Single robot until the environment refactor.** The store holds one `state` and one `action`, plus `leader_state`.
+5. **Single robot until the environment refactor.** The store holds one `state` and one `action`; the leader is a driver owned by the environment (decision 9).
 6. **UI levels:** a camera form opens a `CameraWorker`, a robot form opens an observe-only `RobotWorker`, and the environment, record and inference pages open a `RuntimeSession`, loading environment only, + dataset, or + model respectively. All live updates come from the session store at ~20 Hz. Pages with a session read joints and frames only from the provider, never from per-device sockets.
 7. **Keep the runtime export.** Studio exports a config that runs on `physicalai.runtime` outside Studio, built from the same `ModelControlConfig` the session runs. Settings without a runtime equivalent are flagged as not exported.
 8. **Remove first, rebuild after.** The old runtime is deleted in Phase 0; unfinished features show as work in progress on the feature branch until their phase lands.
+9. **Controls borrow; the session owns.** The environment connects the leader as a plain driver (no worker) and keeps it connected across control switches; `TeleopControl` and HIL borrow it, `ModelControl` borrows the loaded policy. Borrowing controls run as threads in the session process. The store has no leader slot.
