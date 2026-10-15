@@ -28,24 +28,22 @@ from services.event_processor import EventType
 from services.job_service import JobService
 from services.staged_archive import cleanup_staged_archive
 from settings import get_settings
-from workers.base import BaseProcessWorker
+from workers.base import ProcessWorker
 
 if TYPE_CHECKING:
     import multiprocessing as mp
-    from multiprocessing.synchronize import Event as EventClass
     from pathlib import Path
     from uuid import UUID
 
 
-class DatasetImportWorker(BaseProcessWorker):
-    ROLE = "DatasetImportWorker"
-
-    def __init__(self, stop_event: EventClass, event_queue: mp.Queue):
-        super().__init__(stop_event=stop_event)
+class DatasetImportWorker(ProcessWorker[None]):
+    def __init__(self, event_queue: mp.Queue):
+        # Not a daemon, as before: an import may start processes of its own.
+        super().__init__(name="DatasetImportWorker", daemon=False)
         self.queue = event_queue
         self.adapters: list[DatasetImportAdapter] = get_registered_dataset_import_adapters()
 
-    async def run_loop(self) -> None:
+    async def run_loop(self, context: None) -> None:  # noqa: ARG002
         logger.info("Dataset Import Worker is running")
         while not self.should_stop():
             async with get_async_db_session_ctx() as session:
@@ -53,7 +51,7 @@ class DatasetImportWorker(BaseProcessWorker):
             if isinstance(job, DatasetImportJob):
                 await self._process_job(job)
 
-            self.stop_aware_sleep(0.5)
+            await self.sleep(0.5)
 
     async def _process_job(self, job: DatasetImportJob) -> None:
         with job_logging_ctx(job_id=str(job.id)):

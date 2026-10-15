@@ -1,6 +1,7 @@
 import ctypes
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from multiprocessing import Array
-from multiprocessing.synchronize import Event as EventClass
 from typing import Any
 
 import cv2
@@ -9,19 +10,19 @@ from loguru import logger
 
 from schemas.project_camera import Camera
 from utils.camera_factory import build_shared_camera
-from workers.base import BaseThreadWorker, run_at_frequency
+from workers.base import ThreadWorker
+from workers.rate import Rate
 
 
-class CameraWorker(BaseThreadWorker):
+class CameraWorker(ThreadWorker[None]):
     """Orchestrates camera streaming over configurable transport."""
 
     def __init__(
         self,
         config: Camera,
-        stop_event: EventClass,
         is_locked: bool = False,
     ) -> None:
-        super().__init__(stop_event=stop_event)
+        super().__init__(name=f"CameraWorker-{config.name}")
 
         # TODO explicitly add width, height to ip camera
         self._width = config.payload.width or 640
@@ -48,22 +49,19 @@ class CameraWorker(BaseThreadWorker):
         with self._frame_data.get_lock():
             np.frombuffer(self._frame_data.get_obj(), dtype=np.uint8)[:] = data.reshape(-1)
 
-    def setup(self) -> None:
+    @asynccontextmanager
+    async def lifecycle(self) -> AsyncIterator[None]:
         self.camera.connect()
-
-    async def run_loop(self) -> None:
-        """Main worker loop."""
         try:
-            while not self.should_stop():
-                async with run_at_frequency(self.config.payload.fps):
-                    frame = self.camera.read_latest()
-                    self._set_frame(frame.data)
-        except Exception as e:
-            logger.error(e)
+            yield
         finally:
             logger.info("Camera run loop stopped. Disconnecting")
             if self.camera.is_connected:
                 self.camera.disconnect()
 
-    async def teardown(self) -> None:
-        await super().teardown()
+    async def run_loop(self, context: None) -> None:  # noqa: ARG002
+        rate = Rate(self.config.payload.fps, name=self.name)
+        while not self.should_stop():
+            frame = self.camera.read_latest()
+            self._set_frame(frame.data)
+            await rate.sleep()

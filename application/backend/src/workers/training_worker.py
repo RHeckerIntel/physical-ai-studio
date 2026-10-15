@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import multiprocessing as mp
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -32,21 +32,20 @@ from services.training_backends import (
 from services.training_service import TrainingService, TrainingTrackingDispatcher
 from services.training_targets import target_key as training_target_key
 from settings import get_settings
-from workers.base import BaseProcessWorker
+from workers.base import ProcessWorker
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    import multiprocessing as mp
+    from collections.abc import AsyncIterator, Callable, Mapping
     from multiprocessing.managers import DictProxy
-    from multiprocessing.synchronize import Event as EventClass
 
 SCHEDULE_INTERVAL_SEC = 5
 
 
-class TrainingWorker(BaseProcessWorker):
-    ROLE = "TrainingWorker"
-
-    def __init__(self, stop_event: EventClass, job_interrupt_flags: DictProxy, event_queue: mp.Queue):
-        super().__init__(stop_event=stop_event)
+class TrainingWorker(ProcessWorker[None]):
+    def __init__(self, job_interrupt_flags: DictProxy, event_queue: mp.Queue):
+        # Not a daemon: training may start processes of its own (dataloaders).
+        super().__init__(name="TrainingWorker", daemon=False)
         self.queue = event_queue
         # Shared per-job interrupt flags (job id str -> True). Concurrent jobs on
         # different targets each read/clear only their own entry, so cancelling
@@ -54,7 +53,7 @@ class TrainingWorker(BaseProcessWorker):
         self.job_interrupt_flags = job_interrupt_flags
         self._active_training_tasks: dict[str, asyncio.Task[None]] = {}
 
-    async def run_loop(self) -> None:
+    async def run_loop(self, context: None) -> None:  # noqa: ARG002
         logger.info("Training Worker is running")
         try:
             while not self.should_stop():
@@ -68,7 +67,7 @@ class TrainingWorker(BaseProcessWorker):
                     task = asyncio.create_task(self._run_training_job(job, payload), name=f"training-{job.id}")
                     self._active_training_tasks[target] = task
                     task.add_done_callback(self._make_release_callback(target, job.id))
-                self.stop_aware_sleep(0.5)
+                await self.sleep(0.5)
         finally:
             if self._active_training_tasks:
                 await asyncio.gather(*self._active_training_tasks.values(), return_exceptions=True)
@@ -156,14 +155,12 @@ class TrainingWorker(BaseProcessWorker):
             )
             await self._train_model(job, model, snapshot, payload, base_model)
 
-    async def setup(self) -> None:
-        await super().setup()
-        with logger.contextualize(worker=self.__class__.__name__):
-            await self._abort_orphan_jobs()
-
-    async def teardown(self) -> None:
-        await super().teardown()
-        with logger.contextualize(worker=self.__class__.__name__):
+    @asynccontextmanager
+    async def lifecycle(self) -> AsyncIterator[None]:
+        await self._abort_orphan_jobs()
+        try:
+            yield
+        finally:
             await self._abort_orphan_jobs()
 
     @staticmethod
@@ -195,7 +192,6 @@ class TrainingWorker(BaseProcessWorker):
         base_model: Model | None = None,
     ) -> None:
         settings = get_settings()
-        dispatcher_stop_event = mp.Event()
         async with get_async_db_session_ctx() as session:
             await JobService(session, RemoteTrainerService(session)).update_job(
                 job=job,
@@ -208,7 +204,6 @@ class TrainingWorker(BaseProcessWorker):
         dispatcher = TrainingTrackingDispatcher(
             job_id=job.id,
             event_queue=self.queue,
-            interrupt_event=dispatcher_stop_event,
             update_progress=self._update_training_progress,
         )
         interrupted = False
@@ -250,7 +245,7 @@ class TrainingWorker(BaseProcessWorker):
             # Stop the dispatcher and let it flush queued progress BEFORE writing
             # the terminal status. Otherwise a late RUNNING progress update can
             # land after the terminal write and revert the job (stuck at 95%).
-            dispatcher_stop_event.set()
+            dispatcher.request_stop()
             if dispatcher.is_alive():
                 dispatcher.join(timeout=10)
 

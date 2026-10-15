@@ -1,15 +1,13 @@
 import multiprocessing as mp
 import os
-from typing import TYPE_CHECKING
+from contextlib import AsyncExitStack
 
 import psutil
 from loguru import logger
 
+from workers.base import WorkerStartupError
 from workers.dataset_import_worker import DatasetImportWorker
 from workers.training_worker import TrainingWorker
-
-if TYPE_CHECKING:
-    import threading
 
 
 class Scheduler:
@@ -17,8 +15,6 @@ class Scheduler:
 
     def __init__(self) -> None:
         logger.info("Initializing Scheduler...")
-        # Event to sync all processes on application shutdown
-        self.mp_stop_event = mp.Event()
         # Shared, per-job interrupt flags (job id -> True) so cancelling one
         # training job cannot cross-cancel another job running concurrently
         # on a different target. Backed by a Manager dict since training runs
@@ -27,66 +23,32 @@ class Scheduler:
         self.job_interrupt_flags = self.manager.dict()
         self.event_queue: mp.Queue = mp.Queue()
 
-        self.processes: list[mp.Process] = []
-        self.threads: list[threading.Thread] = []
+        self._workers = [
+            TrainingWorker(job_interrupt_flags=self.job_interrupt_flags, event_queue=self.event_queue),
+            DatasetImportWorker(event_queue=self.event_queue),
+        ]
+        self._stack = AsyncExitStack()
         logger.info("Scheduler initialized")
 
-    def start_workers(self) -> None:
-        # mp.set_start_method("spawn", force=True)
-        training_proc = TrainingWorker(
-            stop_event=self.mp_stop_event,
-            job_interrupt_flags=self.job_interrupt_flags,
-            event_queue=self.event_queue,
-        )
-        training_proc.daemon = False
-        training_proc.start()
+    async def start_workers(self) -> None:
+        for worker in self._workers:
+            try:
+                await self._stack.enter_async_context(worker)
+            except WorkerStartupError:
+                # As before: the API still serves without a background worker.
+                logger.exception("Background worker {} failed to start", worker.name)
 
-        dataset_import_proc = DatasetImportWorker(
-            stop_event=self.mp_stop_event,
-            event_queue=self.event_queue,
-        )
-        dataset_import_proc.daemon = False
-        dataset_import_proc.start()
-
-        self.processes.extend([training_proc, dataset_import_proc])
-
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
         """Shutdown all processes gracefully"""
         logger.info("Initiating graceful shutdown...")
-
-        # Signal all processes to stop
-        self.mp_stop_event.set()
-
-        # Get current process info for debugging
         pid = os.getpid()
-        cur_process = psutil.Process(pid)
-        alive_children = [child.pid for child in cur_process.children(recursive=True) if child.is_running()]
+        alive_children = [child.pid for child in psutil.Process(pid).children(recursive=True) if child.is_running()]
         logger.debug(f"Alive children of process '{pid}': {alive_children}")
 
-        # Join threads first
-        for thread in self.threads:
-            if thread.is_alive():
-                logger.debug(f"Joining thread: {thread.name}")
-                thread.join(timeout=10)
-                if thread.is_alive():
-                    logger.warning(f"Thread {thread.name} did not terminate within timeout")
-
-        # Join processes in reverse order so that consumers are terminated before producers.
-        for process in self.processes[::-1]:
-            if process.is_alive():
-                logger.debug(f"Joining process: {process.name}")
-                process.join(timeout=10)
-                if process.is_alive():
-                    logger.warning(f"Force terminating process: {process.name}")
-                    process.terminate()
-                    process.join(timeout=2)
-                    if process.is_alive():
-                        logger.error(f"Force killing process {process.name}")
-                        process.kill()
-
+        # Ask every worker first so they wind down in parallel; the stack then
+        # waits for each (killing any that hang) in reverse start order.
+        for worker in self._workers:
+            worker.request_stop()
+        await self._stack.aclose()
         logger.info("All workers shut down gracefully")
-
-        # Clear references
-        self.processes.clear()
-        self.threads.clear()
         self.manager.shutdown()

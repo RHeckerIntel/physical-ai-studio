@@ -99,7 +99,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     logger.info(f"Starting {settings.app_name} application...")
     ensure_spawn_start_method()
     app_scheduler = Scheduler()
-    app_scheduler.start_workers()
+    await app_scheduler.start_workers()
 
     app.state.scheduler = app_scheduler
     app.state.event_processor = EventProcessor(app_scheduler.event_queue)
@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Ideally RobotHardwareManager would have a shutdown_all method too.
     # For now, we assume active workers unregistering will trigger releases.
 
-    app_scheduler.shutdown()
+    await app_scheduler.shutdown()
     app.state.event_processor.shutdown()
     logger.info("Application shutdown completed")
 

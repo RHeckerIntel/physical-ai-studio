@@ -49,7 +49,7 @@ def _run_dataset_import_job_step() -> None:
         async with get_async_db_session_ctx() as session:
             job = await DatasetImportService(session).claim_pending_dataset_import_job()
         assert isinstance(job, DatasetImportJob), "Expected a pending dataset import job"
-        worker = DatasetImportWorker(stop_event=mp.Event(), event_queue=mp.Queue())
+        worker = DatasetImportWorker(event_queue=mp.Queue())
         await worker._process_job(job)
 
     asyncio.run(_drain())
@@ -103,7 +103,7 @@ def _run_training_job_step() -> None:
             created_at=None,
         )
 
-        worker = TrainingWorker(stop_event=mp.Event(), job_interrupt_flags={}, event_queue=mp.Queue())
+        worker = TrainingWorker(job_interrupt_flags={}, event_queue=mp.Queue())
         await worker._train_model(job, model, snapshot, payload)
 
     asyncio.run(_drain())

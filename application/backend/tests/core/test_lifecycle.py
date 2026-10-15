@@ -30,7 +30,8 @@ def _clear_caches() -> Generator[None]:
 @pytest.fixture
 def _stub_heavy_startup(monkeypatch):
     scheduler = MagicMock()
-    scheduler.mp_stop_event = MagicMock()
+    scheduler.start_workers = AsyncMock()
+    scheduler.shutdown = AsyncMock()
     scheduler.event_queue = MagicMock()
     monkeypatch.setattr(lifecycle_module, "Scheduler", lambda: scheduler)
     monkeypatch.setattr(lifecycle_module, "EventProcessor", lambda queue: MagicMock())

@@ -135,10 +135,9 @@ def worker(stop_event, job_interrupt_flags, event_queue):
     from workers.training_worker import TrainingWorker
 
     w = object.__new__(TrainingWorker)
-    # Mirror BaseProcessWorker/TrainingWorker wiring: should_stop() reads the
+    # Mirror ProcessWorker/TrainingWorker wiring: should_stop() reads the
     # private stop event; _should_interrupt() also reads the per-job flags.
     w._stop_event = stop_event
-    w._interrupt_event = mp.Event()
     w.job_interrupt_flags = job_interrupt_flags
     w.queue = event_queue
     return w
@@ -575,13 +574,12 @@ class TestSetupRecovery:
             calls.append("abort_orphan_jobs")
             assert exclude_job_ids is None
 
-        with (
-            patch.object(TrainingWorker, "_abort_orphan_jobs", staticmethod(fake_abort_orphan_jobs)),
-            patch(f"{MODULE}.BaseProcessWorker.setup", new=AsyncMock()),
-        ):
-            await worker.setup()
+        with patch.object(TrainingWorker, "_abort_orphan_jobs", staticmethod(fake_abort_orphan_jobs)):
+            async with worker.lifecycle():
+                assert calls == ["abort_orphan_jobs"]
 
-        assert calls == ["abort_orphan_jobs"]
+        # And again on the way out, for jobs left running by this worker.
+        assert calls == ["abort_orphan_jobs", "abort_orphan_jobs"]
 
 
 class TestTrainingScheduling:
@@ -593,13 +591,13 @@ class TestTrainingScheduling:
         jobs = [_make_job(_make_payload()), _make_job(remote_payload), _make_job(other_remote_payload)]
         worker._active_training_tasks = {}
         worker.should_stop = MagicMock(side_effect=[False, True])
-        worker.stop_aware_sleep = MagicMock()
+        worker.sleep = AsyncMock()
 
         with (
             patch(f"{MODULE}.JobService.get_pending_train_jobs", AsyncMock(return_value=jobs)),
             patch.object(worker, "_run_training_job", AsyncMock()) as run_job,
         ):
-            await worker.run_loop()
+            await worker.run_loop(None)
             await asyncio.gather(*worker._active_training_tasks.values())
 
         assert run_job.await_count == 3
@@ -616,13 +614,13 @@ class TestTrainingScheduling:
         ]
         worker._active_training_tasks = {}
         worker.should_stop = MagicMock(side_effect=[False, True])
-        worker.stop_aware_sleep = MagicMock()
+        worker.sleep = AsyncMock()
 
         with (
             patch(f"{MODULE}.JobService.get_pending_train_jobs", AsyncMock(return_value=jobs)),
             patch.object(worker, "_run_training_job", AsyncMock()) as run_job,
         ):
-            await worker.run_loop()
+            await worker.run_loop(None)
             await asyncio.gather(*worker._active_training_tasks.values())
 
         assert run_job.await_count == 2

@@ -23,7 +23,7 @@ from robots.features import observation_to_dict
 from robots.shared_robot_errors import translate_robot_error
 from schemas.robot_stream import ErrorEvent, ObservationEvent
 from services import RobotService
-from workers.base import run_at_frequency
+from workers.rate import Rate
 
 router = APIRouter(prefix="/api/projects/{project_id}/robots", tags=["Project Robots"])
 
@@ -65,18 +65,19 @@ async def _disconnect(shared_robot: SharedRobot | None) -> None:
 async def _stream_joint_observations(websocket: WebSocket, shared_robot: SharedRobot, fps: int) -> None:
     """Emit observation frames at ``fps``, with one connected-state after the first read."""
     sent_ready = False
+    rate = Rate(fps, name="robot-observations")
     while True:
-        async with run_at_frequency(fps):
-            observation = await asyncio.to_thread(shared_robot.get_observation)
-            data = observation_to_dict(
-                shared_robot.joint_names,
-                observation,
-                include_velocities=False,
-            )
-            if not sent_ready:
-                await websocket.send_json({"event": "state", "data": {"connected": True}})
-                sent_ready = True
-            await websocket.send_json(ObservationEvent(data=data).model_dump(mode="json"))
+        observation = await asyncio.to_thread(shared_robot.get_observation)
+        data = observation_to_dict(
+            shared_robot.joint_names,
+            observation,
+            include_velocities=False,
+        )
+        if not sent_ready:
+            await websocket.send_json({"event": "state", "data": {"connected": True}})
+            sent_ready = True
+        await websocket.send_json(ObservationEvent(data=data).model_dump(mode="json"))
+        await rate.sleep()
 
 
 @router.get(

@@ -7,12 +7,12 @@ from fastapi import APIRouter, Depends, Query, WebSocket
 from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
 
-from api.dependencies import CameraClaimRegistryDep, SchedulerDep
+from api.dependencies import CameraClaimRegistryDep
 from schemas.camera import SupportedCameraFormat
 from schemas.project_camera import Camera as ProjectCamera
 from schemas.project_camera import CameraAdapter
-from workers.base import run_at_frequency
 from workers.camera_worker import CameraWorker
+from workers.rate import Rate
 
 router = APIRouter(prefix="/api/cameras", tags=["Cameras"])
 
@@ -99,7 +99,6 @@ async def camera_websocket_openapi(
 @router.websocket("/ws")
 async def camera_websocket(
     websocket: WebSocket,
-    scheduler: SchedulerDep,
     claims: CameraClaimRegistryDep,
     camera: Annotated[ProjectCamera, Depends(get_camera_from_query)],
 ) -> None:
@@ -119,22 +118,14 @@ async def camera_websocket(
 
     await websocket.accept()
 
-    worker = None
     try:
         if camera.fingerprint is None:
             raise ValueError("Camera must be reselected")
-        worker = CameraWorker(
-            camera,
-            scheduler.mp_stop_event,
-            is_locked=claims.holder_of(camera.fingerprint) is not None,
-        )
-        worker.start()
-        while True:
-            async with run_at_frequency(camera.payload.fps):
-                frame = worker.get_frame()
-                await websocket.send_bytes(encode_jpeg_rgb(frame))
+        worker = CameraWorker(camera, is_locked=claims.holder_of(camera.fingerprint) is not None)
+        async with worker:
+            rate = Rate(camera.payload.fps, name=worker.name)
+            while True:
+                await websocket.send_bytes(encode_jpeg_rgb(worker.get_frame()))
+                await rate.sleep()
     except WebSocketDisconnect:
         pass
-    finally:
-        if worker:
-            worker.stop()
