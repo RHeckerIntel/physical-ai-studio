@@ -33,7 +33,7 @@ class EnvironmentWorker(BaseThreadWorker[EnvironmentContext]):
    def __init__(self, environment: EnvironmentWithRelations, stop_event: EventClass, daemon: bool = False):
         super().__init__(stop_event=stop_event, daemon=daemon)
         self.environment_config = environment
-      
+
    async def lifecycle(self):
         # one robot for now until refactor of environment
         try:
@@ -58,10 +58,10 @@ class EnvironmentWorker(BaseThreadWorker[EnvironmentContext]):
             follower.disconnect()
             if leader:
                 leader.disconnect()
-            
+
     async def run_loop(self, context: EnvironmentContext):
         # do things with context.
-      
+
 ```
 
 The BaseProcessWorker or BaseThreadWorker will inherit from thread or mp.process and critically the run function will do this:
@@ -80,22 +80,22 @@ Some of these components live in different processes for stability. This means t
 
 1. A Store
 
-A store where the robot state, actions and observations, task (current joint state, next joint state, camera views respectively and task) are kept. 
+A store where the robot state, actions and observations, task (current joint state, next joint state, camera views respectively and task) are kept.
 These are kept in SharedMemory so that all components can easily read and write to it.
 The shape of the store depends on what was loaded first.
 A dataset for example has a specific feature set (robot state and cameras), the actions are simply a mirror of the robot state.
 A model has specific model inputs which decide the shape and an Environment has robots and cameras which decide the robot state, actions and observations.
 The store initially only has state (array), action (array)  and observations (dict of arrays).
 This distills down to state being a Sample.
-The Sample contains the shared memory, the feature names (list of joints or just a name in case of observation (e.g. overhead, wrist)) and a timestamp of when it was set. 
+The Sample contains the shared memory, the feature names (list of joints or just a name in case of observation (e.g. overhead, wrist)) and a timestamp of when it was set.
 
-2. Events over Zenoh. 
+2. Events over Zenoh.
 
-To be able to easily handle events components need to be able to listen for specific events over zenoh. The consumer of the session (e.g. a websocket connection from fastapi) needs to be able to adjust things in the subcomponents. 
+To be able to easily handle events components need to be able to listen for specific events over zenoh. The consumer of the session (e.g. a websocket connection from fastapi) needs to be able to adjust things in the subcomponents.
 
 ## Workers
 
-Most components run on their own frequency. A dataset can be recorded at 50hz, robot at 100hz and model at 30hz for example. It is then also possible to run inference using a model of 30hz but record at 50hz. Yes, there will be some stepping, but that is fine. 
+Most components run on their own frequency. A dataset can be recorded at 50hz, robot at 100hz and model at 30hz for example. It is then also possible to run inference using a model of 30hz but record at 50hz. Yes, there will be some stepping, but that is fine.
 
 ### Robot
 
@@ -107,11 +107,11 @@ CameraWorker is a thread worker that starts a shared_camera from physicalai libr
 
 ### Dataset
 
-A dataset worker runs in a separate process. It listen for start, stop, discard recording events. Once recording it writes the store's values as a frame to the dataset. This is at a desired hz. 
+A dataset worker runs in a separate process. It listen for start, stop, discard recording events. Once recording it writes the store's values as a frame to the dataset. This is at a desired hz.
 
 ### Control
 
-In order to allow for very flexible control of the entire system we need a control system. 
+In order to allow for very flexible control of the entire system we need a control system.
 1. TeleoperationControl reads from leader and writes to the store.action.
 2. ModelControl takes a loaded model and reads the current action from the model giving the current store frame and writes it to the store.action.
 3. MoveControl will gradually move the robot from the current position to the target position over a time by writing to the store.action.
@@ -207,11 +207,14 @@ The joint names come namespaced the way the dataset stores them (e.g. `shoulder_
 
 ## Event bus (zenoh)
 
-- One zenoh session per process, peer mode, localhost only, scouting off. `eclipse-zenoh` is already a direct dependency.
-- Key layout is `studio/session/{session_id}/…`:
+- One zenoh session per process, peer mode, scouting off. The session process hosts it on a Unix socket (`<tmp>/pai-{session_id}.sock`) and its worker processes connect only to that socket, so nothing listens on the network and sessions cannot hear each other. `eclipse-zenoh` is already a direct dependency.
+- Most traffic never touches zenoh: the websocket calls the session directly, and controls are threads in the session's process. Zenoh carries what crosses into worker processes, and events controls listen to.
+- Key layout is `pai/{session_id}/…`:
   - `cmd/{component}`: commands into a component (pub/sub, pydantic payloads, the same discriminated-union style as `contract.py`).
   - `evt/{component}`: state and errors out of a component, which the session aggregates for the websocket.
   - `rpc/{component}/{op}`: a zenoh queryable for commands that need an ack or a result (save/discard episode, load model). It always has a timeout.
+- `runtime_session/bus.py` provides `Bus.host(session_id)` / `Bus.join(session_id)` with `publish`, `subscribe` (a `Subscription` with `await next()` and a non-blocking `poll()` for fixed-rate loops), `request(key, message, response, timeout=)` and `serve(key, model, handler)`. Models may be discriminated unions. `subscribe` and `serve` return a `Declaration` to close or use as a context manager, so a control undeclares what it added on the borrowed session bus when it is switched out. Controls never open a bus of their own: they run in the session process and subscribe from their own thread's loop. A handler's exception is raised in the requester as `BusRequestError`; no reply in time raises `TimeoutError`.
+- Pub/sub is fire-and-forget: a message published before a new subscription has reached the publisher's peer is lost. Anything that must arrive (start/stop recording, save, load) uses `request`.
 - Telemetry (joints and frames) for the UI does **not** go over zenoh. The FastAPI process attaches to the Store and samples it at UI rate. That is cheaper and removes today's bounded event queue.
 
 ## Workers
@@ -350,6 +353,7 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`). One sampler task pe
 1. **Worker foundations:** generic `ThreadWorker[C]` and `ProcessWorker[C]` in `src/workers/base.py`, replacing the old `BaseThreadWorker`/`BaseProcessWorker`, plus `Rate` in `src/workers/rate.py` replacing `run_at_frequency`. Covers readiness and failure propagation, stop, join, then kill. The existing workers (training, dataset import, training dispatcher, camera) and the `Scheduler` moved onto it. Tests use fake workers that crash during setup, crash mid-run, and hang.
 2. **Store:** `FeatureSpec`, `Sample`, lock-free scalar and image buffers (values first, timestamp last), create and attach, compatibility checks with detailed mismatches, and the stale-block sweep. Includes a cross-process read/write test.
 3. **Event bus:** a typed zenoh wrapper with pub/sub and an RPC with ack and timeout. Tests run against a local-only zenoh config.
+   - Done: `runtime_session/bus.py` over a per-session Unix socket. Tests cover pub/sub with a union, request/reply with handler errors and timeouts, a `ProcessWorker` on the bus, and isolation between two sessions. Nothing uses it yet; workers adopt it in Phases 4 and 7.
 4. **Robot and camera workers, plus the environment:** spec from the environment, ported from `runtimev2/environment.py`, and observe-only mode for `RobotWorker`. Move `/api/cameras/ws` and `/robots/{id}/observations/ws` onto the new workers (UI levels 1 and 2). The frontend gets the dumb `CameraView` and `RobotJointsView` plus the standalone hooks. Tested with a fake robot driver, then once on a real SO-101 through `scratch.py`.
 5. **RuntimeSession, registry and session websocket:** load and unload the environment, store lifetime, claims (`device_in_use` for levels 1 and 2, the busy check in `api/robots.py`). Includes the new ws protocol at `/runtime/ws` (commands with acks, `state`, 20 Hz `observation`, binary frames), the new `RuntimeSessionProvider`, and the runtime-sessions footer and list on the registry. The **environment form preview** comes back: its placeholder is removed and its cells read from the provider.
 6. **Controls:** base class, `MoveControl`, `TeleopControl`, and the switching protocol. Teleop buttons are re-enabled.
