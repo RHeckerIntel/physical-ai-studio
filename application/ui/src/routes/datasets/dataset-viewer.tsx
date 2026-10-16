@@ -18,7 +18,6 @@ import { keepPreviousData } from '@tanstack/react-query';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import { $api } from '../../api/client';
-import { RUNTIME_WIP } from '../../components/runtime-wip/runtime-wip';
 import { useDeleteEpisodeQuery } from '../../features/datasets/episodes/use-episodes';
 import { useProjectId } from '../../features/projects/use-project';
 import { paths } from '../../paths';
@@ -80,7 +79,7 @@ export const DatasetViewer = () => {
                     <Text>It&apos;s time to begin recording a dataset. </Text>
                     <Heading>No episodes yet</Heading>
                     <View margin={'size-100'}>
-                        <Button href={recordPath} alignSelf='end' marginBottom={'size-200'} isDisabled={RUNTIME_WIP}>
+                        <Button href={recordPath} alignSelf='end' marginBottom={'size-200'}>
                             <Text>Start recording</Text>
                         </Button>
                     </View>
@@ -108,7 +107,7 @@ export const DatasetViewer = () => {
                 <Panel id='episode-list' defaultSize='35%' minSize='250px' maxSize='70%' className={classes.listPanel}>
                     <Flex justifyContent='space-between' alignItems='center' gap='size-100' marginBottom='size-200'>
                         {selectedEpisodes.length === 0 ? (
-                            <Button href={recordPath} variant='secondary' isDisabled={RUNTIME_WIP}>
+                            <Button href={recordPath} variant='secondary'>
                                 <Add fill='white' style={{ marginRight: '4px' }} />
                                 <Text>Add Episode</Text>
                             </Button>

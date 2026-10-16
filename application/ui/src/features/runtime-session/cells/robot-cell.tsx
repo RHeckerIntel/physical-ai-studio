@@ -2,20 +2,22 @@ import { useState } from 'react';
 
 import { Flex, ProgressCircle, Switch, toast, View } from '@geti-ui/ui';
 
-import { $api } from '../../../../api/client';
-import { getRobotConnectionErrorTitle } from '../../../../api/errors';
-import { useProjectId } from '../../../projects/use-project';
-import { useRuntimeSession, useSessionJoints } from '../../../runtime-session/runtime-session-provider';
-import { RobotViewer, UnavailableRobotViewer } from '../../controller/robot-viewer';
-import { RobotModelsProvider } from '../../robot-models-context';
-import { AvailableSchemaRobot, isUnavailableRobot } from '../../robot-types';
-import { InlineAlert } from '../../setup-wizard/shared/inline-alert';
-import { useSynchronizeModelJoints } from '../../use-synchronize-model-joints';
+import { $api } from '../../../api/client';
+import { getRobotConnectionErrorTitle } from '../../../api/errors';
+import { SchemaTeleopControlConfig } from '../../../api/openapi-spec';
+import { useProjectId } from '../../projects/use-project';
+import { RobotViewer, UnavailableRobotViewer } from '../../robots/controller/robot-viewer';
+import { RobotModelsProvider } from '../../robots/robot-models-context';
+import { AvailableSchemaRobot, isUnavailableRobot } from '../../robots/robot-types';
+import { InlineAlert } from '../../robots/setup-wizard/shared/inline-alert';
+import { useSynchronizeModelJoints } from '../../robots/use-synchronize-model-joints';
+import { useRuntimeSession, useSessionJoints } from '../runtime-session-provider';
 
-// How often the leader is read; each reading is one command to the follower.
-const TELEOP_HZ = 100;
-// How long the follower takes to reach the leader when teleop starts, instead of jumping to it.
-const TELEOP_GRACE_S = 3;
+/**
+ * Teleoperation as the UI starts it. The leader is read at 100 Hz, each reading one command, and on every
+ * start the follower takes 3 s to reach the leader instead of jumping to it.
+ */
+export const TELEOP_CONTROL = { type: 'teleop', hz: 100, grace_s: 3 } as const satisfies SchemaTeleopControlConfig;
 
 /** Drive the follower from the leader, or hold it where it is. */
 const TeleopSwitch = () => {
@@ -26,7 +28,7 @@ const TeleopSwitch = () => {
         setIsPending(true);
         const ack = await send({
             command: 'set_control',
-            control: teleoperate ? { type: 'teleop', hz: TELEOP_HZ, grace_s: TELEOP_GRACE_S } : null,
+            control: teleoperate ? TELEOP_CONTROL : null,
         });
         setIsPending(false);
         if (!ack.ok) {

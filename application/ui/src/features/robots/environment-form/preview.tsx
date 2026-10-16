@@ -8,10 +8,10 @@ import { $api } from '../../../api/client';
 import { SchemaEnvironmentDraft } from '../../../api/openapi-spec';
 import { physicalAiTheme } from '../../dockview';
 import { useProjectId } from '../../projects/use-project';
+import { CameraCell } from '../../runtime-session/cells/camera-cell';
+import { RobotCell } from '../../runtime-session/cells/robot-cell';
 import { RuntimeSessionProvider } from '../../runtime-session/runtime-session-provider';
 import { ReactComponent as RobotIllustration } from './../../../assets/illustrations/INTEL_08_NO-TESTS.svg';
-import { CameraCell } from './cells/camera-cell';
-import { RobotCell } from './cells/robot-cell';
 import { EnvironmentForm, EnvironmentFormState, useEnvironmentForm } from './provider';
 
 const EmptyPreview = () => {

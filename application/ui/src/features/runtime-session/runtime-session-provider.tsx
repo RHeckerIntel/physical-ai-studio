@@ -16,13 +16,19 @@ import { v4 as uuidv4 } from 'uuid';
 import { fetchClient } from '../../api/client';
 import {
     SchemaAckMessage,
+    SchemaDiscardEpisodeCommand,
     SchemaEnvironmentDraft,
+    SchemaEnvironmentWithRelations,
     SchemaErrorMessage,
+    SchemaLoadDatasetCommand,
     SchemaLoadEnvironmentCommand,
     SchemaObservationMessage,
+    SchemaSaveEpisodeCommand,
     SchemaSessionState,
     SchemaSetControlCommand,
+    SchemaStartEpisodeCommand,
     SchemaStateMessage,
+    SchemaUnloadDatasetCommand,
     SchemaUnloadEnvironmentCommand,
 } from '../../api/openapi-spec';
 import { FrameSource } from '../cameras/camera-view';
@@ -32,7 +38,23 @@ type JsonServerMessage = SchemaAckMessage | SchemaStateMessage | SchemaErrorMess
 type Command =
     | Omit<SchemaLoadEnvironmentCommand, 'request_id'>
     | Omit<SchemaUnloadEnvironmentCommand, 'request_id'>
-    | Omit<SchemaSetControlCommand, 'request_id'>;
+    | Omit<SchemaSetControlCommand, 'request_id'>
+    | Omit<SchemaLoadDatasetCommand, 'request_id'>
+    | Omit<SchemaUnloadDatasetCommand, 'request_id'>
+    | Omit<SchemaStartEpisodeCommand, 'request_id'>
+    | Omit<SchemaSaveEpisodeCommand, 'request_id'>
+    | Omit<SchemaDiscardEpisodeCommand, 'request_id'>;
+
+/** The draft a session loads, from a saved environment. */
+export const environmentDraft = (environment: SchemaEnvironmentWithRelations): SchemaEnvironmentDraft => ({
+    name: environment.name,
+    robots: (environment.robots ?? []).map(({ robot, tele_operator }) => ({
+        robot_id: robot.id,
+        tele_operator:
+            tele_operator.type === 'robot' ? { type: 'robot', robot_id: tele_operator.robot_id } : { type: 'none' },
+    })),
+    cameras: (environment.cameras ?? []).flatMap((camera) => (camera.id ? [{ camera_id: camera.id }] : [])),
+});
 
 type Listener<T> = (value: T) => void;
 
@@ -103,10 +125,13 @@ const commandError = (ack: SchemaAckMessage): SchemaErrorMessage => ({
 export const RuntimeSessionProvider = ({
     project_id,
     environment,
+    dataset_id,
     children,
 }: {
     project_id: string;
     environment: SchemaEnvironmentDraft | null;
+    /** Recorded into once the environment is loaded. */
+    dataset_id?: string;
     children: ReactNode;
 }) => {
     const [state, setState] = useState<SchemaSessionState | null>(null);
@@ -193,9 +218,13 @@ export const RuntimeSessionProvider = ({
         const draft = JSON.parse(environmentKey) as SchemaEnvironmentDraft | null;
         const reload = async () => {
             setIsLoading(true);
+            // Unloading the environment unloads the dataset too.
             await send({ command: 'unload_environment' });
             if (draft !== null && draft.robots.length > 0 && !cancelled) {
-                const ack = await send({ command: 'load_environment', environment: draft });
+                let ack = await send({ command: 'load_environment', environment: draft });
+                if (ack.ok && dataset_id !== undefined && !cancelled) {
+                    ack = await send({ command: 'load_dataset', dataset_id });
+                }
                 if (!cancelled) {
                     setError(ack.ok ? null : commandError(ack));
                 }
@@ -208,7 +237,7 @@ export const RuntimeSessionProvider = ({
         return () => {
             cancelled = true;
         };
-    }, [environmentKey, hasSession, send]);
+    }, [environmentKey, dataset_id, hasSession, send]);
 
     const value = useMemo(
         () => ({ state, error, isLoading, observations, frame, send }),

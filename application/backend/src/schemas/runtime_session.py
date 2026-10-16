@@ -129,6 +129,7 @@ class AckMessage(BaseModel):
 
 class SessionCamera(BaseModel):
     camera_id: UUID
+    name: str
     key: str
     """The store and frame key; also the key a dataset records this camera under."""
     height: int

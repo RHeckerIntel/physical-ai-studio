@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@rstest/core';
 
-import { parseObservation } from './runtime-session-provider';
+import { environmentDraft, parseObservation } from './runtime-session-provider';
 
 describe('parseObservation', () => {
     it('splits the header from the jpegs it lists', async () => {
@@ -27,5 +27,27 @@ describe('parseObservation', () => {
         expect(frames.get('wrist')?.type).toBe('image/jpeg');
         const wrist = frames.get('wrist') ?? new Blob();
         expect([...new Uint8Array(await wrist.arrayBuffer())]).toEqual([3, 4, 5]);
+    });
+});
+
+describe('environmentDraft', () => {
+    it('loads a saved environment by its device ids', () => {
+        const draft = environmentDraft({
+            id: 'env',
+            name: 'Bench',
+            robots: [
+                {
+                    robot: { id: 'follower', name: 'Follower', type: 'SO101_Follower', payload: {} },
+                    tele_operator: { type: 'robot', robot_id: 'leader', robot: null },
+                },
+            ],
+            cameras: [{ id: 'cam', name: 'Front' }, { name: 'not saved yet' }],
+        } as unknown as Parameters<typeof environmentDraft>[0]);
+
+        expect(draft).toEqual({
+            name: 'Bench',
+            robots: [{ robot_id: 'follower', tele_operator: { type: 'robot', robot_id: 'leader' } }],
+            cameras: [{ camera_id: 'cam' }],
+        });
     });
 });

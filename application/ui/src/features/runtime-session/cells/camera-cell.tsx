@@ -1,8 +1,8 @@
 import { Flex, ProgressCircle } from '@geti-ui/ui';
 
-import { SchemaSessionCamera } from '../../../../api/openapi-spec';
-import { CameraView } from '../../../cameras/camera-view';
-import { useRuntimeSession, useSessionCamera } from '../../../runtime-session/runtime-session-provider';
+import { SchemaSessionCamera } from '../../../api/openapi-spec';
+import { CameraView } from '../../cameras/camera-view';
+import { useRuntimeSession, useSessionCamera } from '../runtime-session-provider';
 
 const SessionCameraView = ({ camera }: { camera: SchemaSessionCamera }) => {
     const source = useSessionCamera(camera.key);

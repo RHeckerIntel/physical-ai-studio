@@ -25,6 +25,7 @@ def project_resolvers(
     project_id: UUID, robots: RobotService, cameras: ProjectCameraService, datasets: DatasetService
 ) -> Resolvers:
     """Resolvers backed by the database, scoped to ``project_id``."""
+
     async def environment(draft: EnvironmentDraft) -> EnvironmentWithRelations:
         configured = []
         for robot in draft.robots:

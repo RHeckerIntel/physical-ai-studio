@@ -61,6 +61,7 @@ class EnvironmentDescription:
             cameras=[
                 SessionCamera(
                     camera_id=camera.id,
+                    name=camera.name,
                     key=key,
                     height=self.spec.observations[key].height,
                     width=self.spec.observations[key].width,
