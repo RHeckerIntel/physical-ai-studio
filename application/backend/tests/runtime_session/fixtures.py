@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import AsyncExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -89,19 +90,18 @@ def camera_claims() -> CameraClaimRegistry:
 
 
 @pytest.fixture
-def new_session(registry, camera_claims, robot_factory):
-    sessions: list[RuntimeSession] = []
+async def new_session(registry, camera_claims, robot_factory):
+    """Open sessions as their socket does, with ``async with``; whatever a test leaves open closes at the end."""
+    async with AsyncExitStack() as stack:
 
-    def create() -> RuntimeSession:
-        session = RuntimeSession(
-            project_id=uuid4(),
-            project_name="Alpha",
-            registry=registry,
-            camera_claims=camera_claims,
-            robot_factory=robot_factory,
-        )
-        registry.add(session)
-        sessions.append(session)
-        return session
+        async def create() -> RuntimeSession:
+            session = RuntimeSession(
+                project_id=uuid4(),
+                project_name="Alpha",
+                registry=registry,
+                camera_claims=camera_claims,
+                robot_factory=robot_factory,
+            )
+            return await stack.enter_async_context(session)
 
-    return create
+        yield create

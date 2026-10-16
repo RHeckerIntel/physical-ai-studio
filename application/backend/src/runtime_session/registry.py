@@ -84,4 +84,4 @@ class RuntimeSessionRegistry:
             raise DeviceInUseError(device=f"Robot {name!r}", holder=holder.label)
 
     async def close_all(self) -> None:
-        await asyncio.gather(*(session.close("backend_shutdown") for session in self.sessions()))
+        await asyncio.gather(*(session.stop() for session in self.sessions()))

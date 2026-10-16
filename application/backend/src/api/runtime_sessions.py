@@ -4,8 +4,7 @@ Not project-scoped: the footer shows every session, because a session in one
 project can hold a camera another project wants.
 """
 
-import asyncio
-
+import anyio
 from fastapi import APIRouter, WebSocket, status
 from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
@@ -34,9 +33,9 @@ async def runtime_sessions_websocket_openapi() -> Response:
 async def runtime_sessions_websocket(websocket: WebSocket, registry: RuntimeSessionRegistryDep) -> None:  # noqa: D103 - documented on the GET stub
     await websocket.accept()
     try:
-        async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(_send_on_change(websocket, registry))
-            tasks.create_task(_until_closed(websocket))
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(_send_on_change, websocket, registry)
+            tasks.start_soon(_until_closed, websocket)
     except* WebSocketDisconnect:
         pass
 
@@ -61,4 +60,4 @@ async def stop_runtime_session(session_id: str, registry: RuntimeSessionRegistry
     session = registry.get(session_id)
     if session is None:
         raise ResourceNotFoundError(ResourceType.RUNTIME_SESSION, session_id)
-    await session.close("stopped")
+    await session.stop()

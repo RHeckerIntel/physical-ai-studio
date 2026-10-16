@@ -156,3 +156,22 @@ def test_sessions_socket_pushes_changes_and_stop_closes_the_session(client: Test
         while sessions.receive_json()["sessions"]:
             pass
     assert client.post("/api/runtime/sessions/nope/stop").status_code == 404
+
+
+def test_set_control_is_acked_and_reported_in_state(client: TestClient) -> None:
+    with client.websocket_connect(_url()) as websocket:
+        websocket.receive_json()
+        websocket.send_json({"command": "set_control", "request_id": "0", "control": {"type": "teleop"}})
+        refused = _receive_until(websocket, lambda m: m["type"] == "ack")
+        assert refused["error"]["error_code"] == "no_environment"
+
+        websocket.send_json({"command": "load_environment", "request_id": "1", "environment": _draft()})
+        assert _receive_until(websocket, lambda m: m["type"] == "ack")["ok"]
+        websocket.send_json({"command": "set_control", "request_id": "2", "control": {"type": "teleop", "hz": 50}})
+        assert _receive_until(websocket, lambda m: m["type"] == "ack")["ok"]
+        state = _receive_until(websocket, lambda m: m["type"] == "state" and m["data"]["control"] is not None)
+        assert state["data"]["control"] == {"type": "teleop", "hz": 50.0, "grace_s": 3.0}  # the default grace
+
+        websocket.send_json({"command": "set_control", "request_id": "3", "control": None})
+        assert _receive_until(websocket, lambda m: m["type"] == "ack")["ok"]
+        assert _receive_until(websocket, lambda m: m["type"] == "state")["data"]["control"] is None

@@ -21,6 +21,7 @@ import {
     SchemaLoadEnvironmentCommand,
     SchemaObservationMessage,
     SchemaSessionState,
+    SchemaSetControlCommand,
     SchemaStateMessage,
     SchemaUnloadEnvironmentCommand,
 } from '../../api/openapi-spec';
@@ -28,7 +29,10 @@ import { FrameSource } from '../cameras/camera-view';
 import { JointsState } from '../robots/use-robot-observations';
 
 type JsonServerMessage = SchemaAckMessage | SchemaStateMessage | SchemaErrorMessage;
-type Command = Omit<SchemaLoadEnvironmentCommand, 'request_id'> | Omit<SchemaUnloadEnvironmentCommand, 'request_id'>;
+type Command =
+    | Omit<SchemaLoadEnvironmentCommand, 'request_id'>
+    | Omit<SchemaUnloadEnvironmentCommand, 'request_id'>
+    | Omit<SchemaSetControlCommand, 'request_id'>;
 
 type Listener<T> = (value: T) => void;
 

@@ -26,6 +26,31 @@ class EnvironmentDraft(BaseModel):
     cameras: list[CameraEnvironmentConfiguration] = Field(default_factory=list)
 
 
+class TeleopControlConfig(BaseModel):
+    """Drive the follower from the environment's leader arm."""
+
+    type: Literal["teleop"] = "teleop"
+    hz: float = Field(100, gt=0, le=500, description="How often the leader is read; each reading is one command")
+    grace_s: float = Field(
+        3,
+        ge=0,
+        le=30,
+        description="On every start, the follower closes the gap to the leader over this long instead of jumping",
+    )
+
+
+class MoveControlConfig(BaseModel):
+    """Move the follower from where it is to ``position`` over ``duration_s``, then hold there."""
+
+    type: Literal["move"] = "move"
+    position: dict[str, float] = Field(description="Target by joint name (`<joint>.pos`); joints left out stay put")
+    duration_s: float = Field(gt=0, le=60)
+    hz: float = Field(50, gt=0, le=500)
+
+
+ControlConfig = Annotated[TeleopControlConfig | MoveControlConfig, Field(discriminator="type")]
+
+
 class LoadEnvironmentCommand(BaseModel):
     command: Literal["load_environment"] = "load_environment"
     request_id: str
@@ -37,8 +62,16 @@ class UnloadEnvironmentCommand(BaseModel):
     request_id: str
 
 
+class SetControlCommand(BaseModel):
+    """Switch what drives the follower. ``null`` holds it where it is."""
+
+    command: Literal["set_control"] = "set_control"
+    request_id: str
+    control: ControlConfig | None
+
+
 RuntimeSessionCommand = Annotated[
-    LoadEnvironmentCommand | UnloadEnvironmentCommand,
+    LoadEnvironmentCommand | UnloadEnvironmentCommand | SetControlCommand,
     Field(discriminator="command"),
 ]
 
@@ -75,6 +108,8 @@ class SessionEnvironment(BaseModel):
 class SessionState(BaseModel):
     session_id: str
     environment: SessionEnvironment | None = None
+    control: ControlConfig | None = None
+    """What drives the follower; ``None`` holds it still."""
 
 
 class StateMessage(BaseModel):

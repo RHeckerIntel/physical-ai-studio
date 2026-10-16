@@ -10,6 +10,7 @@ import json
 from typing import Annotated
 from uuid import UUID
 
+import anyio
 from fastapi import APIRouter, Query, WebSocket
 from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
@@ -42,6 +43,7 @@ from schemas.runtime_session import (
     RuntimeSessionCommand,
     RuntimeSessionServerMessage,
     SessionError,
+    SetControlCommand,
     StateMessage,
     UnloadEnvironmentCommand,
 )
@@ -98,23 +100,22 @@ async def runtime_session_websocket(  # noqa: PLR0913, D103 - FastAPI dependenci
         camera_claims=camera_claims,
         robot_factory=robot_client_factory,
     )
-    registry.add(session)
 
     async def resolve(draft: EnvironmentDraft) -> EnvironmentWithRelations:
         return await _resolve_environment(draft, project_id, robot_service, camera_service)
 
-    try:
-        await websocket.send_json(StateMessage(data=session.state()).model_dump(mode="json"))
-        async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(_receive_commands(websocket, session, resolve))
-            tasks.create_task(_send_events(websocket, session))
-            tasks.create_task(_sample_store(websocket, session, hz))
-    except* (WebSocketDisconnect, _SessionEnded):
-        pass
-    except* Exception as errors:
-        logger.opt(exception=errors).error("Runtime session {} websocket failed", session.id)
-    finally:
-        await session.close("socket_closed")
+    async with session:
+        try:
+            await websocket.send_json(StateMessage(data=session.state()).model_dump(mode="json"))
+            # anyio, not asyncio.TaskGroup: Starlette cancels through anyio scopes, which asyncio's group can leak.
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(_receive_commands, websocket, session, resolve)
+                tasks.start_soon(_send_events, websocket, session)
+                tasks.start_soon(_sample_store, websocket, session, hz)
+        except* (WebSocketDisconnect, _SessionEnded):
+            pass
+        except* Exception as errors:
+            logger.opt(exception=errors).error("Runtime session {} websocket failed", session.id)
 
 
 async def _resolve_environment(
@@ -170,6 +171,8 @@ async def _run(command: RuntimeSessionCommand, session: RuntimeSession, resolve)
                 await session.load_environment(await resolve(draft))
             case UnloadEnvironmentCommand():
                 await session.unload_environment()
+            case SetControlCommand(control=control):
+                await session.set_control(control)
     except AppBaseException as error:
         return _failed(command, error.message, error.error_code)
     except WorkerStartupError as error:

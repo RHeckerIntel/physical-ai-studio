@@ -1,10 +1,12 @@
 """A runtime session: what one websocket has loaded, and the workers running it.
 
 The session lives in the API process and belongs to the websocket that opened
-it. It owns everything it loads; closing it releases all of it, in reverse.
-For now it loads one environment (see ``runtime_session/environment.py``).
-The session adds what is about the session itself: its claims on the devices,
-watching the workers, and telling its socket about changes.
+it: the socket holds it with ``async with``, and leaving that block releases
+everything it loaded, in reverse. While it runs, its optional parts are loaded
+and unloaded independently, each in its own :class:`Slot`: for now the
+environment (see ``runtime_session/environment.py``) and the control driving
+the follower. The session adds what is about the session itself: its claims on
+the devices, watching the workers, and telling its socket about changes.
 
 See the "RuntimeSession API" section of docs/feature_plans/runtime-inhousing-plan.md.
 """
@@ -13,34 +15,47 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-from contextlib import AsyncExitStack, contextmanager
-from typing import TYPE_CHECKING
+import time
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Self
 from uuid import uuid4
 
 import anyio
 from loguru import logger
 
 from exceptions import RuntimeSessionCommandError
+from runtime_session.controls import build_control
 from runtime_session.environment import connect_environment, describe_environment
+from runtime_session.slot import Slot
+from runtime_session.store import ACTION, STATE
 from schemas.runtime_session import ErrorMessage, RuntimeSessionInfo, SessionEnvironment, SessionState, StateMessage
 from services.camera_claims import CameraClaim, settings_from_camera
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Coroutine, Iterator
     from uuid import UUID
 
     from physicalai.robot import Robot
 
     from robots.robot_client_factory import RobotClientFactory
+    from runtime_session.controls import Control
     from runtime_session.environment import ConnectedEnvironment, EnvironmentDescription
     from runtime_session.registry import RuntimeSessionRegistry
     from runtime_session.store import Store
     from schemas.environment import EnvironmentWithRelations
+    from schemas.runtime_session import ControlConfig
     from services.camera_claims import CameraClaimRegistry
 
 _WATCH_INTERVAL_S = 0.25
 
 type SessionEvent = StateMessage | ErrorMessage
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedEnvironment:
+    connected: ConnectedEnvironment
+    state: SessionEnvironment
 
 
 class RuntimeSession:
@@ -64,37 +79,73 @@ class RuntimeSession:
         self._camera_claims = camera_claims
         self._robot_factory = robot_factory
         self._lock = asyncio.Lock()
-        self._environment: SessionEnvironment | None = None
-        self._connected: ConnectedEnvironment | None = None
-        self._environment_stack: AsyncExitStack | None = None
-        self._watch_task: asyncio.Task[None] | None = None
-        self._unload_task: asyncio.Task[None] | None = None
+        self._environment: Slot[LoadedEnvironment] = Slot("environment")
+        self._control: Slot[Control] = Slot("control")
+        """Uses the environment's store and leader, so it is unloaded before the environment."""
+        self._background: set[asyncio.Task[None]] = set()
+
+    async def __aenter__(self) -> Self:
+        self._registry.add(self)
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self._teardown("socket closed")
+
+    async def stop(self) -> None:
+        """Close the session from outside its socket; the socket gets ``session_closed`` and closes."""
+        await self._teardown("stopped")
+        self._emit(
+            ErrorMessage(
+                component="session",
+                message="The runtime session was closed.",
+                error_code="session_closed",
+                session_alive=False,
+            )
+        )
+
+    async def _teardown(self, reason: str) -> None:
+        """Unload everything and unregister. Runs once, whichever of the socket and a stop gets here first."""
+        if self.closed.is_set():
+            return
+        self.closed.set()
+        with anyio.CancelScope(shield=True):
+            try:
+                await self.unload_environment()
+            finally:
+                self._registry.remove(self)
+                logger.info("Session {} closed ({})", self.id, reason)
 
     @property
     def label(self) -> str:
         """How errors name this session to a user."""
-        if self._environment is not None:
-            return f"the runtime session for {self._environment.name!r} (project {self.project_name!r})"
+        if (environment := self.environment) is not None:
+            return f"the runtime session for {environment.name!r} (project {self.project_name!r})"
         return f"a runtime session in project {self.project_name!r}"
 
     @property
     def environment(self) -> SessionEnvironment | None:
-        return self._environment
+        loaded = self._environment.value
+        return loaded.state if loaded is not None else None
 
     @property
     def store(self) -> Store | None:
-        return self._connected.store if self._connected is not None else None
+        loaded = self._environment.value
+        return loaded.connected.store if loaded is not None else None
 
     @property
     def leader(self) -> Robot | None:
         """The environment's leader, connected, for controls to borrow."""
-        return self._connected.leader if self._connected is not None else None
+        loaded = self._environment.value
+        return loaded.connected.leader if loaded is not None else None
 
     def state(self) -> SessionState:
-        return SessionState(session_id=self.id, environment=self._environment)
+        control = self._control.value
+        return SessionState(
+            session_id=self.id, environment=self.environment, control=control.config if control else None
+        )
 
     def info(self) -> RuntimeSessionInfo:
-        environment = self._environment
+        environment = self.environment
         return RuntimeSessionInfo(
             session_id=self.id,
             project_id=self.project_id,
@@ -111,26 +162,29 @@ class RuntimeSession:
         """Connect the environment's robot, leader and cameras, or fail with nothing held.
 
         Raises:
-            RuntimeSessionCommandError: An environment is already loaded.
+            RuntimeSessionCommandError: The session is closed, or an environment is already loaded.
             DeviceInUseError: Another session holds one of its robots.
             CameraSettingsConflictError: Another session uses a camera at other settings.
             WorkerStartupError: A device failed to connect.
         """
         async with self._lock:
-            if self._environment_stack is not None:
-                raise RuntimeSessionCommandError(
-                    "An environment is already loaded; unload it first.", error_code="environment_already_loaded"
-                )
-            description = await describe_environment(environment, self._robot_factory)
-            async with AsyncExitStack() as stack:
-                stack.enter_context(self._claim(description))
-                connected = await stack.enter_async_context(connect_environment(description, self.id))
-                self._watch_task = asyncio.create_task(self._watch(connected))
-                self._connected = connected
-                self._environment = description.session_environment()
-                self._environment_stack = stack.pop_all()
+            if self.closed.is_set():
+                raise RuntimeSessionCommandError("The session is closed.", error_code="session_closed")
+            await self._environment.load(self._loaded_environment(environment))
             logger.info("Session {} loaded environment {!r}", self.id, environment.name)
         self._emit(StateMessage(data=self.state()))
+
+    @asynccontextmanager
+    async def _loaded_environment(self, environment: EnvironmentWithRelations) -> AsyncIterator[LoadedEnvironment]:
+        """Claim, connect and watch the environment for as long as it is loaded."""
+        description = await describe_environment(environment, self._robot_factory)
+        with self._claim(description):
+            async with connect_environment(description, self.id) as connected:
+                watch = asyncio.create_task(self._watch(connected))
+                try:
+                    yield LoadedEnvironment(connected=connected, state=description.session_environment())
+                finally:
+                    watch.cancel()
 
     @contextmanager
     def _claim(self, description: EnvironmentDescription) -> Iterator[None]:
@@ -163,48 +217,61 @@ class RuntimeSession:
         finally:
             self._registry.release_robots(self)
 
+    async def set_control(self, config: ControlConfig | None) -> None:
+        """Stop the running control, hold the follower where it is, then start ``config``.
+
+        Raises:
+            RuntimeSessionCommandError: No environment is loaded.
+            ValueError: The environment cannot run ``config`` (no leader, unknown joints).
+            WorkerStartupError: The control failed to start; the follower holds.
+        """
+        async with self._lock:
+            loaded = self._environment.require("Load an environment first.")
+            try:
+                await self._switch_control(loaded.connected, config)
+            finally:
+                self._emit(StateMessage(data=self.state()))
+
+    async def _switch_control(self, connected: ConnectedEnvironment, config: ControlConfig | None) -> None:
+        """Hold the lock. One control at a time, by construction: the old one is joined before the next starts."""
+        await self._control.unload()
+        # Hold: the follower stays where it is now, not where the old control last pointed it.
+        if (state := connected.store.read(STATE)) is not None:
+            connected.store.write(ACTION, state.value, timestamp=time.monotonic())
+        if config is not None:
+            await self._control.load(build_control(config, connected.store, connected.leader))
+            logger.info("Session {} switched to {} control", self.id, config.type)
+
     async def unload_environment(self) -> None:
         """Disconnect the environment. A no-op when none is loaded."""
         async with self._lock:
-            stack, self._environment_stack = self._environment_stack, None
-            if stack is None:
+            if (environment := self.environment) is None:
                 return
-            watch, self._watch_task = self._watch_task, None
-            if watch is not None and watch is not asyncio.current_task():
-                watch.cancel()
-            # Cleared before the teardown awaits, so nothing samples a store being unlinked.
-            self._connected = None
-            name = self._environment.name if self._environment else "?"
-            self._environment = None
-            await stack.aclose()
-            logger.info("Session {} unloaded environment {!r}", self.id, name)
+            await self._control.unload()
+            await self._environment.unload()
+            logger.info("Session {} unloaded environment {!r}", self.id, environment.name)
         self._emit(StateMessage(data=self.state()))
 
-    async def close(self, reason: str) -> None:
-        """Release everything. ``reason`` other than ``socket_closed`` is sent to the socket as a final error."""
-        if self.closed.is_set():
-            return
-        self.closed.set()
-        with anyio.CancelScope(shield=True):
-            try:
-                await self.unload_environment()
-            finally:
-                self._registry.remove(self)
-                logger.info("Session {} closed ({})", self.id, reason)
-        if reason != "socket_closed":
-            self._emit(
-                ErrorMessage(
-                    component="session",
-                    message="The runtime session was closed.",
-                    error_code="session_closed",
-                    session_alive=False,
-                )
-            )
-
     async def _watch(self, connected: ConnectedEnvironment) -> None:
-        """Unload the environment when one of its workers dies; the session itself survives."""
+        """Unload the environment when one of its workers dies, and hold when the control dies.
+
+        The session itself survives either.
+        """
+        reported: Control | None = None
         while True:
             await asyncio.sleep(_WATCH_INTERVAL_S)
+            if (control := self._control.value) is not None and control is not reported and not control.is_alive():
+                reported = control
+                logger.error("Session {}: control {} stopped: {}", self.id, control.name, control.failure)
+                self._emit(
+                    ErrorMessage(
+                        component=control.name,
+                        message=control.failure or f"{control.name} stopped",
+                        error_code="control_failed",
+                        session_alive=True,
+                    )
+                )
+                self._run_in_background(self._hold_after(control))
             for worker in connected.workers:
                 if not worker.is_alive():
                     logger.error("Session {}: worker {} stopped: {}", self.id, worker.name, worker.failure)
@@ -216,8 +283,21 @@ class RuntimeSession:
                             session_alive=True,
                         )
                     )
-                    self._unload_task = asyncio.create_task(self.unload_environment())
+                    self._run_in_background(self.unload_environment())
                     return
+
+    async def _hold_after(self, control: Control) -> None:
+        async with self._lock:
+            loaded = self._environment.value
+            if loaded is None or self._control.value is not control:
+                return  # switched or unloaded meanwhile
+            await self._switch_control(loaded.connected, None)
+        self._emit(StateMessage(data=self.state()))
+
+    def _run_in_background(self, coroutine: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(coroutine)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     def _emit(self, event: SessionEvent) -> None:
         self.events.put_nowait(event)

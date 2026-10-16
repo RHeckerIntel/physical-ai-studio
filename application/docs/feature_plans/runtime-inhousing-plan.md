@@ -385,6 +385,26 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`, one call per new fra
      - `RobotJointsView` was not extracted: the robot cell feeds `RobotViewer` through `useSessionJoints`, and the robot form keeps `useRobotObservations`.
    - Known limitation: the form preview reloads the whole environment when its robots or cameras change, so adding a camera reconnects the robot.
 6. **Controls:** base class, `MoveControl`, `TeleopControl`, and the switching protocol. Teleop buttons are re-enabled.
+   - Done:
+     - `runtime_session/controls.py`:
+       - `Control` is a `ThreadWorker` whose `tick()` runs at its own `hz`.
+       - `Control` calls `on_start()` once on its own thread inside `lifecycle` (so a failure there fails the start), then `on_tick()` at `hz`. Each control is its own module in `runtime_session/controls/`.
+       - `TeleopControl` borrows the leader and writes its measured position with the leader's capture time. It refuses a leader whose joints differ from the follower's.
+       - Every time teleop starts there is a grace period (`grace_s`, default 3 s; `0` turns it off). The command blends from where the follower was to the leader's live position, so the follower closes the gap instead of jumping.
+       - `MoveControl` interpolates from the measured state to a target by joint name over `duration_s`, then holds. Joints left out stay put.
+     - Configs are pydantic (`TeleopControlConfig`, `MoveControlConfig`, the `ControlConfig` union) and show up in `state.control`.
+     - `set_control {control: ... | null}`: the session stops and joins the old control, re-seeds `action` from the measured state (hold), then starts the new one. `null` is hold. Unloading the environment stops the control first.
+     - A control that dies (an unplugged leader, say) sends `control_failed`, and the session falls back to hold. The environment stays loaded.
+     - UI: a Teleoperate switch in the environment preview's robot cell, shown when the environment has a leader.
+     - The session and sessions websockets run their tasks in an anyio task group. With `asyncio.TaskGroup`, Starlette's anyio cancellation on close sometimes escaped the handler.
+     - Session lifecycle:
+       - `RuntimeSession` is an async context manager; the websocket holds it with `async with`. Leaving the block unloads everything in reverse and unregisters it.
+       - `stop()` (the stop endpoint, backend shutdown) runs the same idempotent teardown, then sends `session_closed`.
+     - Optional parts:
+       - Each optional part lives in a `Slot[T]` (`runtime_session/slot.py`): empty, or holding what its async context manager yielded. `load` / `unload` / `require(message)` replace the hand-kept stack, value and state fields.
+       - The environment slot holds the claims, the connection and the worker watcher. The control slot holds the running `Control`, which carries its own config.
+       - Dependencies stay explicit: unloading the environment unloads the control first. Phase 7 adds dataset and model slots the same way.
+   - Not done: robot-specific teleop subclasses (driving the leader, torque changes), and a UI for `MoveControl`. Phase 7 uses `MoveControl` for replay and resets.
 7. **Dataset worker:** spec from the dataset (it can be the first load), recording commands, acked save and discard, the finalize path. The **record page** comes back on the new provider (lifting `RUNTIME_WIP` for it). `ReplayControl` follows in the same phase.
 8. **ModelControl:** port the policy execution off `physicalai.runtime` (sync, async with the time-based chunk queue, smoothing). Introduce `ModelControlConfig` and switch `services/runtime_export.py` over to it, along with the export round-trip test. The **inference page** comes back on the new provider, and the `RUNTIME_WIP` flag is deleted. Measure with the oracle model: `actions[i] = f(t0 + i)`.
 9. **Finish:**

@@ -1,4 +1,6 @@
-import { Flex, ProgressCircle, View } from '@geti-ui/ui';
+import { useState } from 'react';
+
+import { Flex, ProgressCircle, Switch, toast, View } from '@geti-ui/ui';
 
 import { $api } from '../../../../api/client';
 import { getRobotConnectionErrorTitle } from '../../../../api/errors';
@@ -9,6 +11,40 @@ import { RobotModelsProvider } from '../../robot-models-context';
 import { AvailableSchemaRobot, isUnavailableRobot } from '../../robot-types';
 import { InlineAlert } from '../../setup-wizard/shared/inline-alert';
 import { useSynchronizeModelJoints } from '../../use-synchronize-model-joints';
+
+// How often the leader is read; each reading is one command to the follower.
+const TELEOP_HZ = 100;
+// How long the follower takes to reach the leader when teleop starts, instead of jumping to it.
+const TELEOP_GRACE_S = 3;
+
+/** Drive the follower from the leader, or hold it where it is. */
+const TeleopSwitch = () => {
+    const { state, send } = useRuntimeSession();
+    const [isPending, setIsPending] = useState(false);
+
+    const setTeleop = async (teleoperate: boolean) => {
+        setIsPending(true);
+        const ack = await send({
+            command: 'set_control',
+            control: teleoperate ? { type: 'teleop', hz: TELEOP_HZ, grace_s: TELEOP_GRACE_S } : null,
+        });
+        setIsPending(false);
+        if (!ack.ok) {
+            toast.negative(ack.error?.message ?? 'Could not switch teleoperation.');
+        }
+    };
+
+    return (
+        <Switch
+            isEmphasized
+            isSelected={state?.control?.type === 'teleop'}
+            isDisabled={isPending}
+            onChange={(teleoperate) => void setTeleop(teleoperate)}
+        >
+            Teleoperate
+        </Switch>
+    );
+};
 
 const LiveRobot = ({ robot }: { robot: AvailableSchemaRobot }) => {
     const joints = useSessionJoints();
@@ -59,6 +95,11 @@ export const RobotCell = ({ follower_id }: { follower_id: string }) => {
                 position={'relative'}
             >
                 <LiveRobot robot={robot} />
+                {state.environment.leader_id !== null && (
+                    <View position={'absolute'} right={0} top={0} padding='size-100'>
+                        <TeleopSwitch />
+                    </View>
+                )}
             </View>
         </RobotModelsProvider>
     );
