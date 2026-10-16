@@ -304,10 +304,13 @@ Server → client:
 
 - `state` (JSON, sent on change): what is loaded, which control is active, recording status, episodes recorded, and the store spec, so the UI knows the joint and camera names.
 - `error` (JSON): component, message, error_code, and whether the session survived it. A robot worker dying is fatal to the environment, not to the socket.
-- `observation` (JSON, **~20 Hz**, configurable via `?hz=`): `{timestamp, state: {joint: value}, action: {...}}`, read from the store.
-- **Camera frames (binary, same 20 Hz tick):** `[u8 key_len][key utf-8][jpeg bytes]`, one message per camera per tick. Only frames newer than the last one sent get re-encoded, so a 15 fps camera isn't encoded 20 times a second. Binary avoids the ~33% base64 overhead.
+- `observation` (**~20 Hz**, configurable via `?hz=`): one binary message per tick holding the joints and the camera frames together, read from the store.
+  - Layout: `[u32 big-endian header length][header JSON][jpeg bytes]`. The header is `{type, timestamp, state: {joint: value}, action: {...}, frames: [{key, timestamp, size}]}`, and the JPEGs follow in the order of `frames`.
+  - `frames` lists only frames newer than the last ones sent, so a 15 fps camera isn't encoded 20 times a second.
+  - Binary avoids the ~33% base64 overhead of JPEGs inside JSON.
+  - `ack`, `state` and `error` stay JSON text messages.
 
-JPEG encoding runs off the event loop (`asyncio.to_thread`). One sampler task per session reads the store and fans out to the socket.
+JPEG encoding runs off the event loop (`asyncio.to_thread`, one call per new frame, in parallel). One sampler task per session reads the store and sends one observation per tick.
 
 ### Frontend
 
@@ -364,7 +367,23 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`). One sampler task pe
      - The worker base shields stop-and-join from cancellation, so a closed websocket still waits for its device to be released.
    - Moved to Phase 5: the dumb `CameraView` / `RobotJointsView` and the standalone hooks. They only pay off once a provider exists to feed them.
    - Not done: the real SO-101 check. The robot detail page and robot form exercise the observe-only path on hardware; the driving path has no UI until Phase 6.
-5. **RuntimeSession, registry and session websocket:** load and unload the environment, store lifetime, claims (`device_in_use` for levels 1 and 2, the busy check in `api/robots.py`). Includes the new ws protocol at `/runtime/ws` (commands with acks, `state`, 20 Hz `observation`, binary frames), the new `RuntimeSessionProvider`, and the runtime-sessions footer and list on the registry. The **environment form preview** comes back: its placeholder is removed and its cells read from the provider.
+5. **RuntimeSession, registry and session websocket:** load and unload the environment, store lifetime, claims (`device_in_use` for levels 1 and 2, the busy check in `api/robots.py`). Includes the new ws protocol at `/runtime/ws` (commands with acks, `state`, and a 20 Hz binary `observation` carrying joints and frames), the new `RuntimeSessionProvider`, and the runtime-sessions footer and list on the registry. The **environment form preview** comes back: its placeholder is removed and its cells read from the provider.
+   - Done:
+     - `runtime_session/session.py`: `RuntimeSession` with `load_environment` / `unload_environment` / `close`.
+       - Loading claims the robots in the registry, pins the cameras in `CameraClaimRegistry` and takes the device locks. It then creates the store and connects the follower `RobotWorker`, the `CameraWorker`s and the leader driver in parallel.
+       - If any step fails, everything already acquired is released. A worker that dies sends `worker_failed` and unloads the environment; the session survives.
+     - `runtime_session/registry.py`: live sessions and their robots. Forms get `device_in_use` naming the session: the robot observations socket, the camera preview socket for a pinned camera, and `DELETE /robots/{id}` (423).
+     - `/api/projects/{id}/runtime/ws?hz=20` implements the protocol above. `load_environment` takes an `EnvironmentDraft` (robots, teleoperator, cameras by id) rather than an `environment_id`, because the form preview loads unsaved environments. The message models are in the OpenAPI schema through the GET stub.
+     - `/api/runtime/sessions/ws` pushes the session list (`RuntimeSessionsMessage`) on connect and whenever a session opens, closes, loads or unloads. There is no polling. `POST /api/runtime/sessions/{id}/stop` closes a session, and its socket gets `session_closed` and closes.
+     - The setup and zero-calibration wizards take the same device lock (`claim_devices`) while they hold the port, so a session, a form or another wizard on that device is refused with `robot_device_already_owned`. They work on unsaved robots, so the registry cannot name the holder.
+     - UI:
+       - `features/runtime-session/runtime-session-provider.tsx`: the socket, state, acked commands, and observation and frame channels. `useSessionJoints` and `useSessionCamera` read from those channels, not React state.
+       - The dumb `CameraView` (`features/cameras/camera-view.tsx`) takes a `FrameSource`; `useCameraSocket` feeds it on the camera form.
+       - The environment preview runs on the provider again.
+       - The footer shows the runtime sessions with Stop, and the robot list marks robots in use.
+   - Not done:
+     - `RobotJointsView` was not extracted: the robot cell feeds `RobotViewer` through `useSessionJoints`, and the robot form keeps `useRobotObservations`.
+   - Known limitation: the form preview reloads the whole environment when its robots or cameras change, so adding a camera reconnects the robot.
 6. **Controls:** base class, `MoveControl`, `TeleopControl`, and the switching protocol. Teleop buttons are re-enabled.
 7. **Dataset worker:** spec from the dataset (it can be the first load), recording commands, acked save and discard, the finalize path. The **record page** comes back on the new provider (lifting `RUNTIME_WIP` for it). `ReplayControl` follows in the same phase.
 8. **ModelControl:** port the policy execution off `physicalai.runtime` (sync, async with the time-based chunk queue, smoothing). Introduce `ModelControlConfig` and switch `services/runtime_export.py` over to it, along with the export round-trip test. The **inference page** comes back on the new provider, and the `RUNTIME_WIP` flag is deleted. Measure with the oracle model: `actions[i] = f(t0 + i)`.

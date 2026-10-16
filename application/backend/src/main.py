@@ -29,6 +29,8 @@ from api.robot_observations import router as robot_observations_router
 from api.robot_setup import router as robot_setup_router
 from api.robot_zero_calibration import router as robot_zero_calibration_router
 from api.robots import router as project_robots_router
+from api.runtime_sessions import router as runtime_sessions_router
+from api.runtime_ws import router as runtime_ws_router
 from api.settings import router as settings_router
 from api.system import system_router
 from api.webui import SPAStaticFiles
@@ -54,6 +56,8 @@ app.include_router(project_cameras_router)
 app.include_router(robot_setup_router)
 app.include_router(robot_zero_calibration_router)
 app.include_router(robot_observations_router)
+app.include_router(runtime_ws_router)
+app.include_router(runtime_sessions_router)
 app.include_router(project_environments_router)
 app.include_router(hardware_router)
 app.include_router(camera_router)

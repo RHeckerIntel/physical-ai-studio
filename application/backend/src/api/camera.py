@@ -5,14 +5,16 @@ from functools import cache
 from typing import Annotated
 
 import anyio
-from fastapi import APIRouter, Depends, Query, WebSocket
+from fastapi import APIRouter, Depends, Query, WebSocket, status
 from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
 
 from api.dependencies import CameraClaimRegistryDep
+from exceptions import DeviceInUseError
 from schemas.camera import SupportedCameraFormat
 from schemas.project_camera import Camera as ProjectCamera
 from schemas.project_camera import CameraAdapter
+from schemas.robot_stream import ErrorEvent
 from utils.camera_factory import build_shared_camera
 from workers.rate import Rate
 
@@ -114,7 +116,8 @@ async def camera_websocket(
         Client sends JSON message on connect:
             camera: JSON serialized ProjectCamera
 
-        Server sends jpeg encoded bytes
+        Server sends jpeg encoded bytes, or one JSON error before closing:
+            {"event": "error", "message": str, "error_code": str}
     """
     from utils.jpeg import encode_jpeg_rgb
 
@@ -123,12 +126,12 @@ async def camera_websocket(
     try:
         if camera.fingerprint is None:
             raise ValueError("Camera must be reselected")
+        if (claim := claims.holder_of(camera.fingerprint)) is not None:
+            raise DeviceInUseError(
+                device=f"Camera {camera.name!r}", holder=f"a runtime session in project {claim.project_name!r}"
+            )
         # SharedCamera already captures in its own publisher process; a preview needs no worker.
-        shared_camera = build_shared_camera(
-            config=camera,
-            validate_on_connect=False,
-            overwrite_settings=claims.holder_of(camera.fingerprint) is None,
-        )
+        shared_camera = build_shared_camera(config=camera, validate_on_connect=False, overwrite_settings=True)
         await asyncio.to_thread(shared_camera.connect)
         try:
             rate = Rate(camera.payload.fps, name=f"camera-preview-{camera.name}")
@@ -145,3 +148,6 @@ async def camera_websocket(
                 await asyncio.to_thread(shared_camera.disconnect)
     except WebSocketDisconnect:
         pass
+    except DeviceInUseError as error:
+        await websocket.send_json(ErrorEvent(message=error.message, error_code=error.error_code).model_dump())
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)

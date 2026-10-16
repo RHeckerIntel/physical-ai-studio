@@ -150,6 +150,7 @@ export const getSshHostKeyFingerprint = (error: unknown): string | undefined => 
 export const getRobotConnectionErrorTitle = (errorCode: string | null): string => {
     switch (errorCode) {
         case 'robot_device_already_owned':
+        case 'device_in_use':
             return 'Robot already in use';
         case 'robot_name_conflict':
             return 'Robot name conflict';

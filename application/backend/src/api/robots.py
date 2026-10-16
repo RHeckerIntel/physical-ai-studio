@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
 
-from api.dependencies import get_robot_service
+from api.dependencies import RuntimeSessionRegistryDep, get_robot_service
 from schemas.robot import (
     ReadableRobot,
     Robot,
@@ -77,6 +77,9 @@ async def delete_project_robot(
     project_id: ProjectID,
     robot_id: UUID,
     robot_service: Annotated[RobotService, Depends(get_robot_service)],
+    registry: RuntimeSessionRegistryDep,
 ) -> None:
     """Delete a robot."""
+    robot = await robot_service.get_robot_by_id(project_id, robot_id)
+    registry.require_robot_free(robot.id, robot.name)
     await robot_service.delete_robot(project_id, robot_id)

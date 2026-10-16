@@ -10,6 +10,7 @@ from loguru import logger
 from core.logging import setup_logging, setup_uvicorn_logging
 from core.security import get_ssh_feature_availability
 from db import get_async_db_session_ctx
+from runtime_session.registry import RuntimeSessionRegistry
 from runtime_session.store import sweep_stale_blocks
 from schemas.remote_trainer import RemoteTrainerConnectionMode
 from services import remote_trainer_tunnel_manager
@@ -81,6 +82,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # In-memory on purpose: see CameraClaimRegistry. Keyed by fingerprint so
     # aliased project rows for the same physical device share one pin.
     app.state.camera_claim_registry = CameraClaimRegistry()
+    app.state.runtime_session_registry = RuntimeSessionRegistry()
 
     # Fail the SSH remote-trainer feature closed if it is bound to a
     # non-loopback address: the feature has no authentication model, so a
@@ -129,6 +131,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Ideally RobotHardwareManager would have a shutdown_all method too.
     # For now, we assume active workers unregistering will trigger releases.
 
+    await app.state.runtime_session_registry.close_all()
     await app_scheduler.shutdown()
     app.state.event_processor.shutdown()
     logger.info("Application shutdown completed")

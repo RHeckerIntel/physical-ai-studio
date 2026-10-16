@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from api.dependencies import get_robot_client_factory, get_robot_service
+from api.dependencies import get_robot_client_factory, get_robot_service, get_runtime_session_registry
 from main import app
 from robots.features import feature_names
 from tests.workers.fake_robot import FakeRobot, sent_actions
@@ -57,7 +57,8 @@ def factory(mock_robot_client_factory, driver: FakeRobot):
 
 
 @pytest.fixture
-def client(factory) -> Iterator[TestClient]:
+def client(factory, registry) -> Iterator[TestClient]:
+    app.dependency_overrides[get_runtime_session_registry] = lambda: registry
     app.dependency_overrides[get_robot_service] = lambda: _StubRobotService(_StubRobot())
     app.dependency_overrides[get_robot_client_factory] = lambda: factory
     try:

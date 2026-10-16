@@ -13,7 +13,7 @@ from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
 from loguru import logger
 
-from api.dependencies import RobotClientFactoryDep, get_robot_service
+from api.dependencies import RobotClientFactoryDep, RuntimeSessionRegistryDep, get_robot_service
 from exceptions import BaseException as AppBaseException
 from runtime_session.store import STATE, Store
 from schemas.robot_stream import ErrorEvent, ObservationEvent
@@ -88,12 +88,14 @@ async def robot_observations_websocket(
     robot_id: UUID,
     robot_service: Annotated[RobotService, Depends(get_robot_service)],
     robot_client_factory: RobotClientFactoryDep,
+    registry: RuntimeSessionRegistryDep,
     fps: Annotated[int, Query(ge=1)] = 30,
 ) -> None:
     """Stream named joint positions from an observe-only robot worker."""
     await websocket.accept()
     try:
         robot = await robot_service.get_robot_by_id(project_id, robot_id)
+        registry.require_robot_free(robot.id, robot.name)
         driver, _definition = await robot_client_factory.build_robot_driver(robot, robot_client_factory)
         recipe = RobotRecipe.from_driver(robot.id, driver)
         with claim_robot(recipe):

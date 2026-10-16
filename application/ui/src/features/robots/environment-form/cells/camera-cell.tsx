@@ -1,12 +1,24 @@
-import { $api } from '../../../../api/client';
-import { WebsocketCamera } from '../../../cameras/websocket-camera';
-import { useProjectId } from '../../../projects/use-project';
+import { Flex, ProgressCircle } from '@geti-ui/ui';
+
+import { SchemaSessionCamera } from '../../../../api/openapi-spec';
+import { CameraView } from '../../../cameras/camera-view';
+import { useRuntimeSession, useSessionCamera } from '../../../runtime-session/runtime-session-provider';
+
+const SessionCameraView = ({ camera }: { camera: SchemaSessionCamera }) => {
+    const source = useSessionCamera(camera.key);
+    return <CameraView source={source} label={`Camera: ${camera.key}`} width={camera.width} height={camera.height} />;
+};
 
 export const CameraCell = ({ camera_id }: { camera_id: string }) => {
-    const { project_id } = useProjectId();
-    const cameraQuery = $api.useSuspenseQuery('get', '/api/projects/{project_id}/cameras/{camera_id}', {
-        params: { path: { project_id, camera_id } },
-    });
+    const { state } = useRuntimeSession();
+    const camera = state?.environment?.cameras.find((candidate) => candidate.camera_id === camera_id);
 
-    return <WebsocketCamera camera={cameraQuery.data} />;
+    if (camera === undefined) {
+        return (
+            <Flex width='100%' height='100%' justifyContent='center' alignItems='center'>
+                <ProgressCircle isIndeterminate aria-label='Connecting camera' />
+            </Flex>
+        );
+    }
+    return <SessionCameraView camera={camera} />;
 };

@@ -6,9 +6,11 @@ import { NavLink, useNavigate, useParams } from 'react-router';
 
 import { $api } from '../../api/client';
 import { getApiErrorMessage, isResourceInUseError } from '../../api/errors';
+import { SchemaRuntimeSessionInfo } from '../../api/openapi-spec';
 import { AddResourceButton } from '../../components/add-resource-button/add-resource-button';
 import { paths } from '../../paths';
 import { useProjectId } from '../projects/use-project';
+import { sessionForRobot, useRuntimeSessions } from '../runtime-sessions/runtime-sessions';
 import RobotArm from './../../assets/robot-arm.webp';
 import { isUnavailableRobot, SchemaRobot } from './robot-types';
 
@@ -149,10 +151,12 @@ const RobotListItem = ({
     robot,
     status,
     isActive,
+    session,
 }: {
     robot: SchemaRobot;
     status: 'online' | 'offline' | 'unknown';
     isActive: boolean;
+    session: SchemaRuntimeSessionInfo | undefined;
 }) => {
     const isUnavailable = isUnavailableRobot(robot);
     const connectionString = isUnavailable
@@ -185,6 +189,11 @@ const RobotListItem = ({
                     </View>
                     <View gridArea='status'>
                         <ConnectionStatus status={status} isUnavailable={isUnavailable} />
+                        {session !== undefined && (
+                            <StatusLight variant='notice'>
+                                In use · {session.environment_name ?? 'runtime session'}
+                            </StatusLight>
+                        )}
                     </View>
                 </Grid>
                 <Flex direction={'row'} justifyContent={'space-between'}>
@@ -235,6 +244,8 @@ export const RobotsList = () => {
         suspense: false,
     });
 
+    const { data: runtimeSessions } = useRuntimeSessions();
+
     return (
         <Flex direction='column' gap='size-200'>
             <AddResourceButton to={paths.project.robots.new({ project_id })}>Configure new robot</AddResourceButton>
@@ -257,6 +268,7 @@ export const RobotsList = () => {
                                     robot={robot}
                                     status={onlineProjectRobots === undefined ? 'unknown' : status}
                                     isActive={isActive}
+                                    session={sessionForRobot(runtimeSessions, robot.id)}
                                 />
                             );
                         }}

@@ -16,6 +16,7 @@ class ResourceType(StrEnum):
     JOB = "JOB"
     JOB_FILE = "JOB_FILE"
     PLUGIN = "Plugin"
+    RUNTIME_SESSION = "Runtime session"
 
 
 class BaseException(Exception):
@@ -258,6 +259,24 @@ class CameraSettingsConflictError(BaseException):
             error_code="camera_settings_conflict",
             http_status=http.HTTPStatus.LOCKED,
         )
+
+
+class DeviceInUseError(BaseException):
+    """Raised when a runtime session holds the robot or camera being asked for."""
+
+    def __init__(self, *, device: str, holder: str) -> None:
+        super().__init__(
+            message=f"{device} is in use by {holder}. Close that session, then try again.",
+            error_code="device_in_use",
+            http_status=http.HTTPStatus.LOCKED,
+        )
+
+
+class RuntimeSessionCommandError(BaseException):
+    """Raised when a runtime session command does not fit the session's state."""
+
+    def __init__(self, message: str, *, error_code: str = "invalid_session_command") -> None:
+        super().__init__(message=message, error_code=error_code, http_status=http.HTTPStatus.CONFLICT)
 
 
 class RobotDeviceAlreadyOwnedError(BaseException):

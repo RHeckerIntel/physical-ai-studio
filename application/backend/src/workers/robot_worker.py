@@ -65,23 +65,30 @@ class RobotRecipe:
 
 @contextmanager
 def claim_robot(recipe: RobotRecipe) -> Iterator[None]:
-    """Hold the robot's devices exclusively, against other workers and ``SharedRobot`` owners.
+    """Hold a robot's devices exclusively. See :func:`claim_devices`."""
+    # Not the SharedRobot name: a SharedRobot seeing its name locked would try to join us.
+    with claim_devices(f"studio-worker-{recipe.robot_id}", recipe.device_ids):
+        yield
+
+
+@contextmanager
+def claim_devices(name: str, device_ids: tuple[str, ...]) -> Iterator[None]:
+    """Hold devices exclusively, against workers, wizards and ``SharedRobot`` owners.
 
     Taken by the parent, whose open lock file dies with it, so a child that is
-    killed cannot leave the device locked.
+    killed cannot leave the device locked. ``name`` must be unique to the holder.
 
     Raises:
-        RobotDeviceAlreadyOwnedError: Something else holds the robot or one of its devices.
+        RobotDeviceAlreadyOwnedError: Something else holds ``name`` or one of the devices.
     """
     # shortcut: physicalai's lock is private API; replace once physicalai exports a device claim.
     from physicalai.robot.transport._lock import DEVICE_KIND, LockContention, acquire_locks
 
     try:
-        # Not the SharedRobot name: a SharedRobot seeing its name locked would try to join us.
-        locks = acquire_locks(f"studio-worker-{recipe.robot_id}", recipe.device_ids)
+        locks = acquire_locks(name, device_ids)
     except LockContention as error:
         raise RobotDeviceAlreadyOwnedError(
-            device_ids=(error.identity,) if error.kind == DEVICE_KIND else recipe.device_ids or None
+            device_ids=(error.identity,) if error.kind == DEVICE_KIND else device_ids or None
         ) from error
     try:
         yield

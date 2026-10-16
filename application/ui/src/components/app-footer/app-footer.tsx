@@ -7,6 +7,7 @@ import { JobsButton } from '../../features/jobs/footer/jobs-button';
 import { useJobUpdates } from '../../features/jobs/use-job-updates';
 import { LogsDialog } from '../../features/logs/logs-dialog';
 import { useOptionalProjectId } from '../../features/projects/use-project';
+import { RuntimeSessionStatus } from '../../features/runtime-sessions/runtime-sessions';
 import { RestartRequiredBanner } from '../../features/system/restart-required-banner';
 
 export const AppFooter = ({ gridArea = 'footer' }: { gridArea?: string }) => {
@@ -47,6 +48,7 @@ export const AppFooter = ({ gridArea = 'footer' }: { gridArea?: string }) => {
                     <JobsButton projectId={project_id} />
                     <Divider orientation='vertical' size='S' />
                     <JobStatus />
+                    <RuntimeSessionStatus />
                     <View marginStart='auto'>
                         <FeedbackButton />
                     </View>
