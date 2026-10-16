@@ -62,6 +62,37 @@ class UnloadEnvironmentCommand(BaseModel):
     request_id: str
 
 
+class LoadDatasetCommand(BaseModel):
+    """Record into this dataset. Needs an environment whose joints and cameras fit it."""
+
+    command: Literal["load_dataset"] = "load_dataset"
+    request_id: str
+    dataset_id: UUID
+
+
+class UnloadDatasetCommand(BaseModel):
+    """Stop recording into the dataset and copy what was recorded back into it."""
+
+    command: Literal["unload_dataset"] = "unload_dataset"
+    request_id: str
+
+
+class StartEpisodeCommand(BaseModel):
+    command: Literal["start_episode"] = "start_episode"
+    request_id: str
+    task: str
+
+
+class SaveEpisodeCommand(BaseModel):
+    command: Literal["save_episode"] = "save_episode"
+    request_id: str
+
+
+class DiscardEpisodeCommand(BaseModel):
+    command: Literal["discard_episode"] = "discard_episode"
+    request_id: str
+
+
 class SetControlCommand(BaseModel):
     """Switch what drives the follower. ``null`` holds it where it is."""
 
@@ -71,7 +102,14 @@ class SetControlCommand(BaseModel):
 
 
 RuntimeSessionCommand = Annotated[
-    LoadEnvironmentCommand | UnloadEnvironmentCommand | SetControlCommand,
+    LoadEnvironmentCommand
+    | UnloadEnvironmentCommand
+    | SetControlCommand
+    | LoadDatasetCommand
+    | UnloadDatasetCommand
+    | StartEpisodeCommand
+    | SaveEpisodeCommand
+    | DiscardEpisodeCommand,
     Field(discriminator="command"),
 ]
 
@@ -105,11 +143,21 @@ class SessionEnvironment(BaseModel):
     cameras: list[SessionCamera]
 
 
+class SessionDataset(BaseModel):
+    dataset_id: UUID
+    name: str
+    fps: int
+    is_recording: bool
+    episodes_recorded: int
+    """Saved in this session and not yet copied into the dataset, which happens when it is unloaded."""
+
+
 class SessionState(BaseModel):
     session_id: str
     environment: SessionEnvironment | None = None
     control: ControlConfig | None = None
     """What drives the follower; ``None`` holds it still."""
+    dataset: SessionDataset | None = None
 
 
 class StateMessage(BaseModel):
@@ -124,6 +172,14 @@ class ErrorMessage(BaseModel):
     error_code: str
     session_alive: bool
     """False when the session has ended; the socket closes after this message."""
+
+
+SessionEvent = Annotated[StateMessage | ErrorMessage, Field(discriminator="type")]
+"""What the session publishes on ``evt/session`` for its socket to forward."""
+
+
+class CommandDone(BaseModel):
+    """The reply to a command that has no result."""
 
 
 class ObservationFrame(BaseModel):

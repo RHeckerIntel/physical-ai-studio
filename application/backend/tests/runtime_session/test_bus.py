@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from runtime_session.bus import Bus, BusRequestError, socket_path
+from runtime_session.bus import Bus, BusRequestError, NoResponderError, socket_path
 
 from .bus_fakes import Command, EchoWorker, Heard, Say, Stop, upper
 
@@ -45,11 +45,15 @@ async def test_request_replies_and_reports_handler_errors(session_id: str) -> No
         bus.serve("rpc/echo/upper", Say, upper)
         bus.serve("rpc/echo/slow", Say, slow)
         assert await bus.request("rpc/echo/upper", Say(text="hi"), Heard, timeout=1) == Heard(text="HI")
-        with pytest.raises(BusRequestError, match="nothing to say"):
+        with pytest.raises(BusRequestError, match="nothing to say") as failed:
             await bus.request("rpc/echo/upper", Say(text=""), Heard, timeout=1)
+        assert failed.value.error_code == "command_failed"
+        with pytest.raises(BusRequestError) as invalid:
+            await bus.request("rpc/echo/upper", '{"kind": "say"}', Heard, timeout=1)
+        assert invalid.value.error_code == "invalid_command"
         with pytest.raises(TimeoutError):
             await bus.request("rpc/echo/slow", Say(text="hi"), Heard, timeout=0.2)
-        with pytest.raises(TimeoutError):
+        with pytest.raises(NoResponderError):
             await bus.request("rpc/nobody/home", Say(text="hi"), Heard, timeout=0.2)
 
 
@@ -72,7 +76,7 @@ async def test_sessions_do_not_hear_each_other(session_id: str) -> None:
         other_bus.publish("cmd/echo", Say(text="hi"))
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(heard.next(), 0.3)
-        with pytest.raises(TimeoutError):
+        with pytest.raises(NoResponderError):
             await other_bus.request("rpc/echo/upper", Say(text="hi"), Heard, timeout=0.2)
 
 
@@ -85,5 +89,5 @@ async def test_closing_a_declaration_undeclares_only_it(session_id: str) -> None
         assert await asyncio.wait_for(kept.next(), 1) == Say(text="hi")
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(dropped.next(), 0.2)
-        with pytest.raises(TimeoutError):
+        with pytest.raises(NoResponderError):
             await bus.request("rpc/echo/upper", Say(text="hi"), Heard, timeout=0.2)

@@ -2,11 +2,16 @@
 
 The session lives in the API process and belongs to the websocket that opened
 it: the socket holds it with ``async with``, and leaving that block releases
-everything it loaded, in reverse. While it runs, its optional parts are loaded
-and unloaded independently, each in its own :class:`Slot`: for now the
-environment (see ``runtime_session/environment.py``) and the control driving
-the follower. The session adds what is about the session itself: its claims on
-the devices, watching the workers, and telling its socket about changes.
+everything it loaded, in reverse. Like the workers, it is a part on the bus:
+while it runs it serves its own commands (loading, unloading and switching
+control, see ``command_key``) and publishes its state and errors on
+``evt/session``. The socket only forwards between the two.
+
+Its optional parts are loaded and unloaded independently, each in its own
+:class:`Slot`: the environment (see ``runtime_session/environment.py``), the
+control driving the follower, and the dataset being recorded. The session adds
+what is about the session itself: its claims on the devices and watching the
+workers.
 
 See the "RuntimeSession API" section of docs/feature_plans/runtime-inhousing-plan.md.
 """
@@ -24,38 +29,91 @@ from uuid import uuid4
 import anyio
 from loguru import logger
 
+from exceptions import BaseException as AppBaseException
 from exceptions import RuntimeSessionCommandError
+from runtime_session.bus import Bus, NoResponderError, Subscription, command_key
 from runtime_session.controls import build_control
+from runtime_session.dataset import dataset_fps, dataset_spec
 from runtime_session.environment import connect_environment, describe_environment
 from runtime_session.slot import Slot
-from runtime_session.store import ACTION, STATE
-from schemas.runtime_session import ErrorMessage, RuntimeSessionInfo, SessionEnvironment, SessionState, StateMessage
+from runtime_session.store import ACTION, STATE, FeatureSpecMismatchError
+from schemas.runtime_session import (
+    CommandDone,
+    ErrorMessage,
+    LoadDatasetCommand,
+    LoadEnvironmentCommand,
+    RuntimeSessionInfo,
+    SessionDataset,
+    SessionEnvironment,
+    SessionState,
+    SetControlCommand,
+    StateMessage,
+    UnloadDatasetCommand,
+    UnloadEnvironmentCommand,
+)
 from services.camera_claims import CameraClaim, settings_from_camera
+from workers import dataset_worker as dataset_rpc
+from workers.base import WorkerStartupError
+from workers.dataset_worker import DatasetWorker, RecordingStatus
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
     from uuid import UUID
 
     from physicalai.robot import Robot
+    from pydantic import BaseModel
 
     from robots.robot_client_factory import RobotClientFactory
     from runtime_session.controls import Control
     from runtime_session.environment import ConnectedEnvironment, EnvironmentDescription
     from runtime_session.registry import RuntimeSessionRegistry
     from runtime_session.store import Store
+    from schemas.dataset import Dataset
     from schemas.environment import EnvironmentWithRelations
-    from schemas.runtime_session import ControlConfig
+    from schemas.runtime_session import ControlConfig, EnvironmentDraft
     from services.camera_claims import CameraClaimRegistry
 
 _WATCH_INTERVAL_S = 0.25
 
-type SessionEvent = StateMessage | ErrorMessage
+EVENTS = "evt/session"
+"""Where the session publishes its state and errors (``SessionEvent``)."""
+
+
+_DATASET_READY_S = 10.0
+"""How long a started dataset worker has to answer on the bus."""
+
+
+@dataclass(frozen=True, slots=True)
+class Resolvers:
+    """Look up what a command names, in the session's project; supplied by whoever opens the session."""
+
+    environment: Callable[[EnvironmentDraft], Awaitable[EnvironmentWithRelations]]
+    dataset: Callable[[UUID], Awaitable[Dataset]]
 
 
 @dataclass(frozen=True, slots=True)
 class LoadedEnvironment:
     connected: ConnectedEnvironment
     state: SessionEnvironment
+    robot_type: str
+    """The follower's type, which a new dataset records."""
+
+
+@dataclass(slots=True)
+class LoadedDataset:
+    dataset: Dataset
+    fps: int
+    status: RecordingStatus
+    """What the worker last published on ``evt/dataset``; the worker owns it."""
+
+    def state(self) -> SessionDataset:
+        return SessionDataset(
+            dataset_id=self.dataset.id,
+            name=self.dataset.name,
+            fps=self.fps,
+            is_recording=self.status.is_recording,
+            episodes_recorded=self.status.episodes_recorded,
+        )
 
 
 class RuntimeSession:
@@ -67,14 +125,14 @@ class RuntimeSession:
         registry: RuntimeSessionRegistry,
         camera_claims: CameraClaimRegistry,
         robot_factory: RobotClientFactory,
+        resolve: Resolvers,
     ) -> None:
         self.id = uuid4().hex
         self.project_id = project_id
         self.project_name = project_name
         self.started_at = datetime.datetime.now(tz=datetime.UTC)
-        self.events: asyncio.Queue[SessionEvent] = asyncio.Queue()
-        """State changes and errors, for the owning websocket."""
         self.closed = asyncio.Event()
+        self._resolve = resolve
         self._registry = registry
         self._camera_claims = camera_claims
         self._robot_factory = robot_factory
@@ -82,28 +140,26 @@ class RuntimeSession:
         self._environment: Slot[LoadedEnvironment] = Slot("environment")
         self._control: Slot[Control] = Slot("control")
         """Uses the environment's store and leader, so it is unloaded before the environment."""
+        self._dataset: Slot[LoadedDataset] = Slot("dataset")
+        """Records the environment's store, so it is unloaded before the environment."""
+        self._bus: Bus | None = None
+        """Hosted for the session's lifetime; its worker processes join it."""
         self._background: set[asyncio.Task[None]] = set()
 
     async def __aenter__(self) -> Self:
+        self._bus = Bus.host(self.id)
+        self._serve_commands(self._bus)
         self._registry.add(self)
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        await self._teardown("socket closed")
+        await self._teardown("socket closed", notify=False)
 
     async def stop(self) -> None:
         """Close the session from outside its socket; the socket gets ``session_closed`` and closes."""
-        await self._teardown("stopped")
-        self._emit(
-            ErrorMessage(
-                component="session",
-                message="The runtime session was closed.",
-                error_code="session_closed",
-                session_alive=False,
-            )
-        )
+        await self._teardown("stopped", notify=True)
 
-    async def _teardown(self, reason: str) -> None:
+    async def _teardown(self, reason: str, *, notify: bool) -> None:
         """Unload everything and unregister. Runs once, whichever of the socket and a stop gets here first."""
         if self.closed.is_set():
             return
@@ -113,7 +169,36 @@ class RuntimeSession:
                 await self.unload_environment()
             finally:
                 self._registry.remove(self)
+                if notify:
+                    self._emit(
+                        ErrorMessage(
+                            component="session",
+                            message="The runtime session was closed.",
+                            error_code="session_closed",
+                            session_alive=False,
+                        )
+                    )
+                if self._bus is not None:
+                    self._bus.close()
                 logger.info("Session {} closed ({})", self.id, reason)
+
+    def _serve_commands(self, bus: Bus) -> None:
+        """Serve the commands that change what the session holds; workers serve their own."""
+        commands: dict[str, tuple[type[BaseModel], Callable[[Any], Awaitable[None]]]] = {
+            "load_environment": (LoadEnvironmentCommand, lambda command: self._load_draft(command.environment)),
+            "unload_environment": (UnloadEnvironmentCommand, lambda _command: self.unload_environment()),
+            "set_control": (SetControlCommand, lambda command: self.set_control(command.control)),
+            "load_dataset": (LoadDatasetCommand, lambda command: self._load_dataset_by_id(command.dataset_id)),
+            "unload_dataset": (UnloadDatasetCommand, lambda _command: self.unload_dataset()),
+        }
+        for name, (model, run) in commands.items():
+            bus.serve(command_key(name), model, _as_command(run))
+
+    async def _load_draft(self, draft: EnvironmentDraft) -> None:
+        await self.load_environment(await self._resolve.environment(draft))
+
+    async def _load_dataset_by_id(self, dataset_id: UUID) -> None:
+        await self.load_dataset(await self._resolve.dataset(dataset_id))
 
     @property
     def label(self) -> str:
@@ -121,6 +206,13 @@ class RuntimeSession:
         if (environment := self.environment) is not None:
             return f"the runtime session for {environment.name!r} (project {self.project_name!r})"
         return f"a runtime session in project {self.project_name!r}"
+
+    @property
+    def bus(self) -> Bus:
+        """The session's bus: commands go onto it, and its events come off it."""
+        if self._bus is None:
+            raise RuntimeSessionCommandError("The session is not open.", error_code="session_closed")
+        return self._bus
 
     @property
     def environment(self) -> SessionEnvironment | None:
@@ -139,9 +231,12 @@ class RuntimeSession:
         return loaded.connected.leader if loaded is not None else None
 
     def state(self) -> SessionState:
-        control = self._control.value
+        control, dataset = self._control.value, self._dataset.value
         return SessionState(
-            session_id=self.id, environment=self.environment, control=control.config if control else None
+            session_id=self.id,
+            environment=self.environment,
+            control=control.config if control else None,
+            dataset=dataset.state() if dataset else None,
         )
 
     def info(self) -> RuntimeSessionInfo:
@@ -182,7 +277,11 @@ class RuntimeSession:
             async with connect_environment(description, self.id) as connected:
                 watch = asyncio.create_task(self._watch(connected))
                 try:
-                    yield LoadedEnvironment(connected=connected, state=description.session_environment())
+                    yield LoadedEnvironment(
+                        connected=connected,
+                        state=description.session_environment(),
+                        robot_type=environment.robots[0].robot.type,
+                    )
                 finally:
                     watch.cancel()
 
@@ -248,9 +347,89 @@ class RuntimeSession:
             if (environment := self.environment) is None:
                 return
             await self._control.unload()
+            await self._dataset.unload()
             await self._environment.unload()
             logger.info("Session {} unloaded environment {!r}", self.id, environment.name)
         self._emit(StateMessage(data=self.state()))
+
+    async def load_dataset(self, dataset: Dataset) -> None:
+        """Start recording into ``dataset`` from the environment's store.
+
+        Raises:
+            RuntimeSessionCommandError: No environment is loaded, or a dataset already is.
+            FeatureSpecMismatchError: The dataset was recorded with joints or cameras this environment lacks.
+            WorkerStartupError: The dataset could not be opened for recording.
+        """
+        async with self._lock:
+            environment = self._environment.require("Load an environment first.")
+            await self._dataset.load(self._loaded_dataset(dataset, environment))
+            logger.info("Session {} records into dataset {!r}", self.id, dataset.name)
+        self._emit(StateMessage(data=self.state()))
+
+    @asynccontextmanager
+    async def _loaded_dataset(self, dataset: Dataset, environment: LoadedEnvironment) -> AsyncIterator[LoadedDataset]:
+        store = environment.connected.store
+        if (recorded := dataset_spec(dataset)) is not None:
+            store.spec.require_compatible(recorded)
+        fps = dataset_fps(dataset)
+        worker = DatasetWorker(
+            dataset,
+            session_id=self.id,
+            store_name=store.name,
+            spec=store.spec,
+            fps=fps,
+            robot_type=environment.robot_type,
+        )
+        # Subscribed before the worker starts, so no status it publishes is missed.
+        with self.bus.subscribe(dataset_rpc.EVENTS, RecordingStatus) as statuses:
+            async with worker:
+                loaded = LoadedDataset(dataset=dataset, fps=fps, status=await self._until_serving())
+                tasks = [
+                    asyncio.create_task(self._fold_statuses(loaded, statuses)),
+                    asyncio.create_task(self._watch_dataset(worker)),
+                ]
+                try:
+                    yield loaded
+                finally:
+                    for task in tasks:
+                        task.cancel()
+
+    async def _until_serving(self) -> RecordingStatus:
+        """The worker's first status: its queryables take a moment to reach this process's bus."""
+        deadline = time.monotonic() + _DATASET_READY_S
+        while True:
+            try:
+                return await self.bus.request(dataset_rpc.STATUS, dataset_rpc.Empty(), RecordingStatus, timeout=1.0)
+            except (NoResponderError, TimeoutError):
+                if time.monotonic() > deadline:
+                    raise
+                await asyncio.sleep(0.05)
+
+    async def _fold_statuses(self, loaded: LoadedDataset, statuses: Subscription[RecordingStatus]) -> None:
+        """The worker owns its recording state; show whatever it last announced."""
+        while True:
+            loaded.status = await statuses.next()
+            self._emit(StateMessage(data=self.state()))
+
+    async def unload_dataset(self) -> None:
+        """Stop recording and copy what was recorded back into the dataset. A no-op when none is loaded."""
+        async with self._lock:
+            await self._dataset.unload()
+        self._emit(StateMessage(data=self.state()))
+
+    async def _watch_dataset(self, worker: DatasetWorker) -> None:
+        """Unload the dataset if its worker dies; what it saved but did not copy back is lost."""
+        await worker.wait_stopped()
+        logger.error("Session {}: dataset worker stopped: {}", self.id, worker.failure)
+        self._emit(
+            ErrorMessage(
+                component=worker.name,
+                message=worker.failure or "The dataset worker stopped",
+                error_code="worker_failed",
+                session_alive=True,
+            )
+        )
+        self._run_in_background(self.unload_dataset())
 
     async def _watch(self, connected: ConnectedEnvironment) -> None:
         """Unload the environment when one of its workers dies, and hold when the control dies.
@@ -299,7 +478,40 @@ class RuntimeSession:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    def _emit(self, event: SessionEvent) -> None:
-        self.events.put_nowait(event)
+    def _emit(self, event: StateMessage | ErrorMessage) -> None:
+        if self._bus is not None:
+            self._bus.publish(EVENTS, event)
         if event.type == "state":
             self._registry.changed()
+
+
+def _as_command(run: Callable[[Any], Awaitable[None]]) -> Callable[[Any], Awaitable[CommandDone]]:
+    """A bus handler for a session command, failing with an error code its requester can show."""
+
+    async def handle(command: Any) -> CommandDone:
+        try:
+            await run(command)
+        except Exception as error:
+            raise _command_error(error) from error
+        return CommandDone()
+
+    return handle
+
+
+_ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
+    (FeatureSpecMismatchError, "feature_mismatch"),  # before ValueError, which it is
+    (TimeoutError, "command_timeout"),
+    (ValueError, "invalid_session_command"),
+)
+
+
+def _command_error(error: Exception) -> Exception:
+    if isinstance(error, AppBaseException):
+        return error
+    if isinstance(error, WorkerStartupError):
+        return RuntimeSessionCommandError(f"{error.worker_name}: {error.reason}", error_code="device_connection_failed")
+    code = next((code for kind, code in _ERROR_CODES if isinstance(error, kind)), None)
+    if code is None:
+        logger.opt(exception=error).error("Runtime session command failed")
+        code = "internal_error"
+    return RuntimeSessionCommandError(str(error) or type(error).__name__, error_code=code)

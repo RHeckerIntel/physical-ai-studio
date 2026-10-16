@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from api.dependencies import (
     get_camera_claim_registry,
     get_camera_service,
+    get_dataset_service,
     get_project_service,
     get_robot_client_factory,
     get_robot_service,
@@ -71,6 +72,39 @@ def _receive_until(websocket, predicate, limit: int = 200) -> dict:
     raise AssertionError("message never arrived")
 
 
+class _Socket:
+    """Send commands and read acks, keeping the latest state meanwhile.
+
+    The session publishes its state as soon as it changes, so a state can arrive
+    before the ack of the command that changed it.
+    """
+
+    def __init__(self, websocket) -> None:
+        self.websocket = websocket
+        self.state: dict = {}
+
+    def receive_until(self, predicate, limit: int = 300) -> dict:
+        for _ in range(limit):
+            message = self.websocket.receive()
+            if "text" not in message:
+                continue
+            parsed = json.loads(message["text"])
+            if parsed["type"] == "state":
+                self.state = parsed["data"]
+            if predicate(parsed):
+                return parsed
+        raise AssertionError("message never arrived")
+
+    def ack(self, command: dict) -> dict:
+        self.websocket.send_json({**command, "request_id": command["command"]})
+        return self.receive_until(lambda m: m["type"] == "ack" and m["request_id"] == command["command"])
+
+    def until_state(self, predicate) -> dict:
+        if not (self.state and predicate(self.state)):
+            self.receive_until(lambda m: m["type"] == "state" and predicate(m["data"]))
+        return self.state
+
+
 def _parse_observation(data: bytes) -> tuple[dict, dict[str, bytes]]:
     length = int.from_bytes(data[:4], "big")
     header = json.loads(data[4 : 4 + length])
@@ -94,12 +128,12 @@ def test_load_stream_and_unload(client: TestClient, registry) -> None:
     with client.websocket_connect(_url()) as websocket:
         first = websocket.receive_json()
         assert first["type"] == "state" and first["data"]["environment"] is None
+        socket = _Socket(websocket)
 
-        websocket.send_json({"command": "load_environment", "request_id": "1", "environment": _draft()})
-        ack = _receive_until(websocket, lambda m: m["type"] == "ack")
-        assert ack == {"type": "ack", "request_id": "1", "ok": True, "error": None, "result": None}
-        state = _receive_until(websocket, lambda m: m["type"] == "state")
-        assert state["data"]["environment"]["joint_names"] == ["shoulder_pan.pos", "gripper.pos"]
+        ack = socket.ack({"command": "load_environment", "environment": _draft()})
+        assert ack == {"type": "ack", "request_id": "load_environment", "ok": True, "error": None, "result": None}
+        state = socket.until_state(lambda data: data["environment"] is not None)
+        assert state["environment"]["joint_names"] == ["shoulder_pan.pos", "gripper.pos"]
         assert [s.info().environment_name for s in registry.sessions()] == ["Bench"]
 
         for _ in range(200):
@@ -115,8 +149,7 @@ def test_load_stream_and_unload(client: TestClient, registry) -> None:
         assert set(frames) == {"cam 0"}
         assert frames["cam 0"].startswith(b"\xff\xd8")  # a JPEG
 
-        websocket.send_json({"command": "unload_environment", "request_id": "2"})
-        assert _receive_until(websocket, lambda m: m["type"] == "ack")["ok"]
+        assert socket.ack({"command": "unload_environment"})["ok"]
     assert registry.sessions() == []
     assert registry.holder_of_robot(FOLLOWER_ID) is None
 
@@ -126,7 +159,12 @@ def test_bad_commands_get_a_failed_ack(client: TestClient) -> None:
         websocket.receive_json()
         websocket.send_json({"command": "fly", "request_id": "7"})
         ack = websocket.receive_json()
-        assert ack["request_id"] == "7" and not ack["ok"] and ack["error"]["error_code"] == "invalid_command"
+        assert ack["request_id"] == "7" and not ack["ok"] and ack["error"]["error_code"] == "command_unavailable"
+        websocket.send_json({"command": "set_control", "request_id": "8"})  # missing its control
+        ack = websocket.receive_json()
+        assert ack["request_id"] == "8" and ack["error"]["error_code"] == "invalid_command"
+        websocket.send_text("not json")
+        assert websocket.receive_json()["error"]["error_code"] == "invalid_command"
 
 
 def test_sessions_socket_pushes_changes_and_stop_closes_the_session(client: TestClient) -> None:
@@ -161,17 +199,53 @@ def test_sessions_socket_pushes_changes_and_stop_closes_the_session(client: Test
 def test_set_control_is_acked_and_reported_in_state(client: TestClient) -> None:
     with client.websocket_connect(_url()) as websocket:
         websocket.receive_json()
-        websocket.send_json({"command": "set_control", "request_id": "0", "control": {"type": "teleop"}})
-        refused = _receive_until(websocket, lambda m: m["type"] == "ack")
+        socket = _Socket(websocket)
+        refused = socket.ack({"command": "set_control", "control": {"type": "teleop"}})
         assert refused["error"]["error_code"] == "no_environment"
 
-        websocket.send_json({"command": "load_environment", "request_id": "1", "environment": _draft()})
-        assert _receive_until(websocket, lambda m: m["type"] == "ack")["ok"]
-        websocket.send_json({"command": "set_control", "request_id": "2", "control": {"type": "teleop", "hz": 50}})
-        assert _receive_until(websocket, lambda m: m["type"] == "ack")["ok"]
-        state = _receive_until(websocket, lambda m: m["type"] == "state" and m["data"]["control"] is not None)
-        assert state["data"]["control"] == {"type": "teleop", "hz": 50.0, "grace_s": 3.0}  # the default grace
+        assert socket.ack({"command": "load_environment", "environment": _draft()})["ok"]
+        assert socket.ack({"command": "set_control", "control": {"type": "teleop", "hz": 50}})["ok"]
+        state = socket.until_state(lambda data: data["control"] is not None)
+        assert state["control"] == {"type": "teleop", "hz": 50.0, "grace_s": 3.0}  # the default grace
 
-        websocket.send_json({"command": "set_control", "request_id": "3", "control": None})
-        assert _receive_until(websocket, lambda m: m["type"] == "ack")["ok"]
-        assert _receive_until(websocket, lambda m: m["type"] == "state")["data"]["control"] is None
+        assert socket.ack({"command": "set_control", "control": None})["ok"]
+        assert socket.until_state(lambda data: data["control"] is None)["control"] is None
+
+
+def test_recording_commands_over_the_socket(client: TestClient) -> None:
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from schemas.dataset import Dataset
+    from tests.workers.fake_dataset import FakeDatasetWorker
+
+    ours = Dataset(id=uuid4(), name="Blocks", default_task="pick", project_id=PROJECT_ID, environment_id=uuid4())
+    theirs = Dataset(id=uuid4(), name="Other", default_task="pick", project_id=uuid4(), environment_id=uuid4())
+    Path(ours.path).mkdir(parents=True)
+    datasets = {ours.id: ours, theirs.id: theirs}
+    app.dependency_overrides[get_dataset_service] = lambda: SimpleNamespace(
+        get_dataset_by_id=AsyncMock(side_effect=lambda dataset_id: datasets[dataset_id])
+    )
+
+    with (
+        patch("runtime_session.session.DatasetWorker", FakeDatasetWorker),
+        client.websocket_connect(_url()) as websocket,
+    ):
+        websocket.receive_json()
+        socket = _Socket(websocket)
+        assert socket.ack({"command": "load_environment", "environment": _draft()})["ok"]
+        unavailable = socket.ack({"command": "start_episode", "task": "pick"})
+        assert unavailable["error"]["error_code"] == "command_unavailable"
+        refused = socket.ack({"command": "load_dataset", "dataset_id": str(theirs.id)})
+        assert refused["error"]["error_code"] == "Dataset_not_found"  # as the REST API reports it
+
+        assert socket.ack({"command": "load_dataset", "dataset_id": str(ours.id)})["ok"]
+        assert socket.ack({"command": "start_episode", "task": "pick"})["ok"]
+        assert socket.ack({"command": "save_episode"})["ok"]
+        # The worker publishes its new status; the session shows it.
+        state = socket.until_state(lambda data: (data["dataset"] or {}).get("episodes_recorded") == 1)
+        assert not state["dataset"]["is_recording"]
+        failed = socket.ack({"command": "save_episode"})
+        assert failed["error"]["error_code"] == "no_episode"
+        assert "No episode" in failed["error"]["message"]
+        assert socket.ack({"command": "unload_dataset"})["ok"]

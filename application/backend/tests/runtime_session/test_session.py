@@ -9,7 +9,7 @@ from exceptions import DeviceInUseError, RuntimeSessionCommandError
 from runtime_session.store import ACTION, STATE
 from workers.base import WorkerStartupError
 
-from .fixtures import FOLLOWER_ID, LEADER_ID, make_environment
+from .fixtures import FOLLOWER_ID, LEADER_ID, make_environment, subscribe_events
 
 
 async def _until(condition, within: float = 5.0) -> None:
@@ -21,6 +21,7 @@ async def _until(condition, within: float = 5.0) -> None:
 
 async def test_loading_connects_everything_and_publishes_state(new_session, registry, fake_cameras) -> None:
     session = await new_session()
+    events = subscribe_events(session)
     try:
         await session.load_environment(make_environment())
 
@@ -31,7 +32,7 @@ async def test_loading_connects_everything_and_publishes_state(new_session, regi
         assert session.leader is not None and session.leader.is_connected()
         assert registry.holder_of_robot(FOLLOWER_ID) is session
         assert registry.holder_of_robot(LEADER_ID) is session
-        assert session.events.get_nowait().data.environment == environment
+        assert (await asyncio.wait_for(events.next(), 1)).data.environment == environment
 
         store = session.store
         await _until(lambda: store.read(STATE) is not None and store.read_observation("cam 0") is not None)
@@ -98,16 +99,17 @@ async def test_a_failed_connect_leaves_nothing_held(new_session, registry, robot
 
 async def test_a_dead_worker_unloads_the_environment_but_not_the_session(new_session, fake_cameras) -> None:
     session = await new_session()
+    events = subscribe_events(session)
     await session.load_environment(make_environment())
-    session.events.get_nowait()
+    await asyncio.wait_for(events.next(), 1)  # the loaded state
     fake_cameras.return_value.read_latest.side_effect = RuntimeError("camera unplugged")
 
-    error = await asyncio.wait_for(session.events.get(), 5)
+    error = await asyncio.wait_for(events.next(), 5)
     assert error.type == "error"
     assert error.error_code == "worker_failed"
     assert error.session_alive
     assert "camera unplugged" in error.message
-    state = await asyncio.wait_for(session.events.get(), 15)
+    state = await asyncio.wait_for(events.next(), 15)
     assert state.type == "state" and state.data.environment is None
     assert not session.closed.is_set()
     await session.stop()
@@ -115,8 +117,9 @@ async def test_a_dead_worker_unloads_the_environment_but_not_the_session(new_ses
 
 async def test_stopping_tells_the_socket(new_session) -> None:
     session = await new_session()
+    events = subscribe_events(session)
     await session.stop()
-    event = session.events.get_nowait()
+    event = await asyncio.wait_for(events.next(), 1)
     assert event.error_code == "session_closed"
     assert not event.session_alive
 
@@ -176,6 +179,7 @@ async def test_a_failing_control_reports_and_falls_back_to_hold(new_session) -> 
     from schemas.runtime_session import TeleopControlConfig
 
     session = await new_session()
+    events = subscribe_events(session)
     await session.load_environment(make_environment(cameras=0))
     try:
 
@@ -184,7 +188,7 @@ async def test_a_failing_control_reports_and_falls_back_to_hold(new_session) -> 
 
         session.leader.get_observation = unplugged
         await session.set_control(TeleopControlConfig())
-        while (event := await asyncio.wait_for(session.events.get(), 5)).type != "error":
+        while (event := await asyncio.wait_for(events.next(), 5)).type != "error":
             pass
         assert event.error_code == "control_failed"
         assert "leader unplugged" in event.message

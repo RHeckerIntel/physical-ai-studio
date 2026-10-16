@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import time
 from contextlib import AsyncExitStack
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import numpy as np
 import pytest
 
+from runtime_session import session as runtime_session
+from runtime_session.bus import Subscription
 from runtime_session.registry import RuntimeSessionRegistry
-from runtime_session.session import RuntimeSession
+from runtime_session.session import Resolvers, RuntimeSession
 from schemas.environment import EnvironmentWithRelations
+from schemas.runtime_session import SessionEvent
 from services.camera_claims import CameraClaimRegistry
 from tests.workers.fake_robot import FakeRobot
 
@@ -101,7 +105,17 @@ async def new_session(registry, camera_claims, robot_factory):
                 registry=registry,
                 camera_claims=camera_claims,
                 robot_factory=robot_factory,
+                resolve=Resolvers(environment=_unresolvable, dataset=_unresolvable),
             )
             return await stack.enter_async_context(session)
 
         yield create
+
+
+async def _unresolvable(_what: object) -> Any:
+    raise AssertionError("these tests load rows directly, not by id")
+
+
+def subscribe_events(session: RuntimeSession) -> Subscription[Any]:
+    """What the session publishes for its socket, as the socket subscribes to it."""
+    return session.bus.subscribe(runtime_session.EVENTS, SessionEvent)

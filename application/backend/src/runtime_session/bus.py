@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Self
 
 import zenoh
 from loguru import logger
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -29,8 +29,26 @@ if TYPE_CHECKING:
 _ROOT = "pai"
 
 
+def command_key(command: str) -> str:
+    """Where a client command is served: ``rpc/<command>``, by whichever part handles it.
+
+    A command names what to do, not who does it, so a socket can forward
+    commands without knowing which part of the session answers them.
+    """
+    return f"rpc/{command}"
+
+
 class BusRequestError(RuntimeError):
-    """The handler of a request raised; carries its message."""
+    """The handler of a request raised; carries its message and error code."""
+
+    def __init__(self, message: str, error_code: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.error_code = error_code
+
+
+class NoResponderError(LookupError):
+    """Nothing serves the requested key right now, for example a command for a part that is not loaded."""
 
 
 def socket_path(session_id: str) -> Path:
@@ -52,9 +70,10 @@ class Declaration:
 
     def close(self) -> None:
         self._open.discard(self)
-        if self._entity is not None:
-            self._entity.undeclare()
-            self._entity = None
+        # Taken out first, so of two closers (the owner, and the bus closing) only one undeclares it.
+        entity, self._entity = self._entity, None
+        if entity is not None:
+            entity.undeclare()
 
     def __enter__(self) -> Self:
         return self
@@ -126,21 +145,33 @@ class Bus:
         subscription._entity = self._session.declare_subscriber(self._prefix + key, subscription._on_sample)
         return subscription
 
-    async def request[R](self, key: str, message: BaseModel, response: type[R] | Any, *, timeout: float) -> R:  # noqa: ASYNC109 - zenoh enforces it
-        """Send ``message`` to the handler serving ``key`` and return its reply.
+    async def request[R](
+        self,
+        key: str,
+        message: BaseModel | str,
+        response: type[R] | Any,
+        *,
+        timeout: float,  # noqa: ASYNC109 - zenoh enforces it
+    ) -> R:
+        """Send ``message`` (a model, or JSON as is) to the handler serving ``key`` and return its reply.
 
         Raises:
-            BusRequestError: The handler raised.
-            TimeoutError: Nobody serves ``key`` or the handler did not reply in time.
+            BusRequestError: The handler raised; carries its message and error code.
+            NoResponderError: Nothing serves ``key``.
+            TimeoutError: The handler did not reply in time.
         """
-        replies = await asyncio.to_thread(self._get, self._prefix + key, message.model_dump_json(), timeout)
+        payload = message if isinstance(message, str) else message.model_dump_json()
+        replies = await asyncio.to_thread(self._get, self._prefix + key, payload, timeout)
         # zenoh reports its own timeout as an error reply without a replier
-        replies = [reply for reply in replies if reply.ok is not None or reply.replier_id is not None]
-        if not replies:
-            raise TimeoutError(f"No reply on {key} within {timeout}s")
-        reply = replies[0]
+        answered = [reply for reply in replies if reply.ok is not None or reply.replier_id is not None]
+        if not answered:
+            if replies:
+                raise TimeoutError(f"No reply on {key} within {timeout}s")
+            raise NoResponderError(f"Nothing serves {key}")
+        reply = answered[0]
         if reply.ok is None:
-            raise BusRequestError(reply.err.payload.to_string() if reply.err else "")
+            error = json.loads(reply.err.payload.to_string()) if reply.err else {}
+            raise BusRequestError(error.get("message", ""), error.get("error_code", "command_failed"))
         adapter: TypeAdapter[R] = TypeAdapter(response)
         return adapter.validate_json(reply.ok.payload.to_bytes())
 
@@ -153,7 +184,8 @@ class Bus:
         """Answer requests on ``key``; call from the event loop async handlers run on.
 
         An exception in ``handler`` is sent back and raised in the requester as
-        :class:`BusRequestError`.
+        :class:`BusRequestError`, with the exception's ``error_code`` if it has
+        one (``invalid_command`` for a payload that does not validate).
         """
         loop = asyncio.get_running_loop()
         adapter: TypeAdapter[M] = TypeAdapter(model)
@@ -166,7 +198,7 @@ class Bus:
                 query.reply(query.key_expr, result.model_dump_json())
             except Exception as error:  # every failure goes back to the requester
                 logger.opt(exception=error).debug("Request on {} failed", key)
-                query.reply_err(str(error))
+                query.reply_err(json.dumps({"message": str(error), "error_code": _error_code(error)}))
             finally:
                 query.drop()
 
@@ -187,6 +219,13 @@ class Bus:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+def _error_code(error: Exception) -> str:
+    if isinstance(error, ValidationError):
+        return "invalid_command"
+    code = getattr(error, "error_code", None)
+    return code if isinstance(code, str) else "command_failed"
 
 
 def _config(*, listen: Path | None = None, connect: Path | None = None) -> zenoh.Config:

@@ -1,13 +1,15 @@
 """The runtime session websocket: one session for the lifetime of the socket.
 
-The client loads things into the session with commands, each acked. The server
-sends the session's state on change, errors, observations at ``hz`` and every
-new camera frame as a binary message. See ``schemas/runtime_session.py``.
+The socket only forwards. Every JSON command goes onto the session's bus as a
+request on ``rpc/<command>``; whichever part serves it (the session, or a
+worker such as the dataset worker) answers, and the answer becomes the ack.
+What the session publishes on ``evt/session`` (state, errors) goes back out,
+and the store is sampled at ``hz`` into one binary observation per tick. See
+``schemas/runtime_session.py`` for the messages.
 """
 
 import asyncio
-import json
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 import anyio
@@ -15,46 +17,45 @@ from fastapi import APIRouter, Query, WebSocket
 from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
 from loguru import logger
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from api.dependencies import (
     CameraClaimRegistryDep,
+    DatasetServiceDep,
     ProjectCameraServiceDep,
     ProjectServiceDep,
     RobotClientFactoryDep,
     RobotServiceDep,
     RuntimeSessionRegistryDep,
 )
-from exceptions import BaseException as AppBaseException
+from runtime_session import session as runtime_session
+from runtime_session.bus import Bus, BusRequestError, NoResponderError, Subscription, command_key
+from runtime_session.resolve import project_resolvers
 from runtime_session.session import RuntimeSession
 from runtime_session.store import ACTION, STATE, Sample
-from schemas.environment import (
-    EnvironmentWithRelations,
-    RobotWithTeleoperator,
-    TeleoperatorNoneWithRobot,
-    TeleoperatorRobotWithRobot,
-)
 from schemas.runtime_session import (
     AckMessage,
-    EnvironmentDraft,
-    LoadEnvironmentCommand,
     ObservationFrame,
     ObservationMessage,
     RuntimeSessionCommand,
     RuntimeSessionServerMessage,
     SessionError,
-    SetControlCommand,
+    SessionEvent,
     StateMessage,
-    UnloadEnvironmentCommand,
 )
-from services import RobotService
-from services.project_camera_service import ProjectCameraService
-from workers.base import WorkerStartupError
 from workers.rate import Rate
 
 router = APIRouter(prefix="/api/projects/{project_id}/runtime", tags=["Runtime Sessions"])
 
-_COMMANDS: TypeAdapter[RuntimeSessionCommand] = TypeAdapter(RuntimeSessionCommand)
+_COMMAND_TIMEOUT_S = 600.0
+"""A backstop only: every handler bounds its own work (a dataset copy, a video encode)."""
+
+
+class _CommandHeader(BaseModel):
+    """All the socket reads of a command; whoever serves it validates the rest."""
+
+    command: str = Field(pattern=r"^[a-z_]+$")
+    request_id: str
 
 
 class _SessionEnded(Exception):
@@ -86,6 +87,7 @@ async def runtime_session_websocket(  # noqa: PLR0913, D103 - FastAPI dependenci
     project_service: ProjectServiceDep,
     robot_service: RobotServiceDep,
     camera_service: ProjectCameraServiceDep,
+    dataset_service: DatasetServiceDep,
     robot_client_factory: RobotClientFactoryDep,
     registry: RuntimeSessionRegistryDep,
     camera_claims: CameraClaimRegistryDep,
@@ -99,101 +101,59 @@ async def runtime_session_websocket(  # noqa: PLR0913, D103 - FastAPI dependenci
         registry=registry,
         camera_claims=camera_claims,
         robot_factory=robot_client_factory,
+        resolve=project_resolvers(project_id, robot_service, camera_service, dataset_service),
     )
-
-    async def resolve(draft: EnvironmentDraft) -> EnvironmentWithRelations:
-        return await _resolve_environment(draft, project_id, robot_service, camera_service)
-
     async with session:
         try:
-            await websocket.send_json(StateMessage(data=session.state()).model_dump(mode="json"))
-            # anyio, not asyncio.TaskGroup: Starlette cancels through anyio scopes, which asyncio's group can leak.
-            async with anyio.create_task_group() as tasks:
-                tasks.start_soon(_receive_commands, websocket, session, resolve)
-                tasks.start_soon(_send_events, websocket, session)
-                tasks.start_soon(_sample_store, websocket, session, hz)
+            with session.bus.subscribe(runtime_session.EVENTS, SessionEvent) as events:
+                await websocket.send_json(StateMessage(data=session.state()).model_dump(mode="json"))
+                # anyio, not asyncio.TaskGroup: Starlette cancels through anyio scopes, which asyncio's group can leak.
+                async with anyio.create_task_group() as tasks:
+                    tasks.start_soon(_forward_commands, websocket, session.bus)
+                    tasks.start_soon(_forward_events, websocket, events)
+                    tasks.start_soon(_sample_store, websocket, session, hz)
         except* (WebSocketDisconnect, _SessionEnded):
             pass
         except* Exception as errors:
             logger.opt(exception=errors).error("Runtime session {} websocket failed", session.id)
 
 
-async def _resolve_environment(
-    draft: EnvironmentDraft, project_id: UUID, robots: RobotService, cameras: ProjectCameraService
-) -> EnvironmentWithRelations:
-    """Look up the rows a draft refers to, in this project."""
-    configured = []
-    for robot in draft.robots:
-        teleoperator: TeleoperatorRobotWithRobot | TeleoperatorNoneWithRobot = TeleoperatorNoneWithRobot()
-        if robot.tele_operator.type == "robot":
-            leader = await robots.get_robot_by_id(project_id, robot.tele_operator.robot_id)
-            teleoperator = TeleoperatorRobotWithRobot(robot_id=leader.id, robot=leader)
-        follower = await robots.get_robot_by_id(project_id, robot.robot_id)
-        configured.append(RobotWithTeleoperator(robot=follower, tele_operator=teleoperator))
-    return EnvironmentWithRelations(
-        id=UUID(int=0),  # unused: a session does not care whether the environment is saved
-        name=draft.name,
-        robots=configured,
-        cameras=[await cameras.get_camera_by_id(project_id, camera.camera_id) for camera in draft.cameras],
-    )
-
-
-async def _receive_commands(websocket: WebSocket, session: RuntimeSession, resolve) -> None:  # noqa: ANN001
-    """Run commands one at a time, in order, and ack each."""
+async def _forward_commands(websocket: WebSocket, bus: Bus) -> None:
+    """Put each command onto the bus, one at a time and in order, and ack it with the reply."""
     while True:
         raw = await websocket.receive_text()
-        try:
-            command = _COMMANDS.validate_json(raw)
-        except ValidationError as error:
-            await websocket.send_json(
-                AckMessage(
-                    request_id=_request_id(raw),
-                    ok=False,
-                    error=SessionError(message=str(error), error_code="invalid_command"),
-                ).model_dump(mode="json")
-            )
-            continue
-        ack = await _run(command, session, resolve)
+        ack = await _request(bus, raw)
         await websocket.send_json(ack.model_dump(mode="json"))
 
 
-def _request_id(raw: str) -> str:
+async def _request(bus: Bus, raw: str) -> AckMessage:
     try:
-        return str(json.loads(raw).get("request_id", ""))
-    except (ValueError, AttributeError):
-        return ""
+        header = _CommandHeader.model_validate_json(raw)
+    except ValidationError as error:
+        return AckMessage(request_id="", ok=False, error=SessionError(message=str(error), error_code="invalid_command"))
 
+    def failed(message: str, error_code: str) -> AckMessage:
+        return AckMessage(
+            request_id=header.request_id, ok=False, error=SessionError(message=message, error_code=error_code)
+        )
 
-async def _run(command: RuntimeSessionCommand, session: RuntimeSession, resolve) -> AckMessage:  # noqa: ANN001
     try:
-        match command:
-            case LoadEnvironmentCommand(environment=draft):
-                await session.load_environment(await resolve(draft))
-            case UnloadEnvironmentCommand():
-                await session.unload_environment()
-            case SetControlCommand(control=control):
-                await session.set_control(control)
-    except AppBaseException as error:
-        return _failed(command, error.message, error.error_code)
-    except WorkerStartupError as error:
-        return _failed(command, f"{error.worker_name}: {error.reason}", "device_connection_failed")
-    except ValueError as error:
-        return _failed(command, str(error), "invalid_session_command")
-    except Exception as error:
-        logger.exception("Runtime session {} command {} failed", session.id, command.command)
-        return _failed(command, str(error) or type(error).__name__, "internal_error")
-    return AckMessage(request_id=command.request_id, ok=True)
+        result: dict[str, Any] = await bus.request(
+            command_key(header.command), raw, dict[str, Any], timeout=_COMMAND_TIMEOUT_S
+        )
+    except BusRequestError as error:
+        return failed(error.message, error.error_code)
+    except NoResponderError:
+        # Nothing serves it now: an unknown command, or one for a part that is not loaded (a dataset, say).
+        return failed(f"Nothing can {header.command} right now; load what it needs first.", "command_unavailable")
+    except TimeoutError:
+        return failed(f"{header.command} did not finish in time", "command_timeout")
+    return AckMessage(request_id=header.request_id, ok=True, result=result or None)
 
 
-def _failed(command: RuntimeSessionCommand, message: str, error_code: str) -> AckMessage:
-    return AckMessage(
-        request_id=command.request_id, ok=False, error=SessionError(message=message, error_code=error_code)
-    )
-
-
-async def _send_events(websocket: WebSocket, session: RuntimeSession) -> None:
+async def _forward_events(websocket: WebSocket, events: Subscription[Any]) -> None:
     while True:
-        event = await session.events.get()
+        event = await events.next()
         await websocket.send_json(event.model_dump(mode="json"))
         if event.type == "error" and not event.session_alive:
             await websocket.close()
