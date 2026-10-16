@@ -427,6 +427,19 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`, one call per new fra
      - Database lookups for commands (a draft's rows, a dataset in the project) live in `runtime_session/resolve.py` and are handed to the session as `Resolvers`.
      - `Declaration.close()` takes its zenoh entity out before undeclaring it, so a declaration closed by its owner and by the bus at once is undeclared exactly once.
      - Ack error codes include `feature_mismatch`, `no_episode` / `episode_open` / `task_required` from the worker, `command_unavailable`, `invalid_command` and `command_timeout`.
+   - 7b done (the recording viewer UI):
+     - `RuntimeSessionProvider` takes an optional `dataset_id` and loads it once the environment is loaded; reloading the environment reloads both. It sends the recording commands, and `environmentDraft()` turns a saved environment into the draft a session loads.
+     - `SessionViewer` (`features/runtime-session/session-viewer.tsx`) replaces the separate record and inference viewers.
+       - It docks the session's follower and cameras with dockview, as `main` does, under a toolbar the page passes in.
+       - Until the environment and every part the page names (a dataset, later a model) is loaded, it shows what it is waiting for, the session's error, and Cancel.
+       - The record page passes a `RecordingToolbar` (task box, start / accept / discard with the hotkeys, the recording timer); Phase 8 passes the inference toolbar.
+       - The session cells (`RobotCell` with its Teleoperate switch, `CameraCell`) moved to `features/runtime-session/cells/`, shared with the environment preview.
+       - `state.environment.cameras` carries each camera's `name` for the panel titles.
+     - The record page's session content sits inside its own `<Suspense>`, inside the provider. Otherwise a cell suspending while it loads took the page-level boundary, unmounted the provider, and ended the session; the page then reopened a session that found the robot still held by the one tearing down.
+     - Teleop starts once the dataset is loaded when the environment has a leader, as before. `TELEOP_CONTROL` is the one place the UI's teleop rate and grace period live.
+     - Leaving the page finishes the recording first: the back link sends `unload_dataset`, which copies the episodes into the dataset, waits for the ack, then refreshes the episodes and navigates. The episode total adds the session's `episodes_recorded` to what the dataset holds, because saved episodes reach the dataset only on that copy.
+     - `RUNTIME_WIP` is off "Start recording" and "Add Episode"; it stays on the inference page until Phase 8.
+   - Known gap: closing the tab or navigating away another way still saves the recording (the session's teardown copies it back), but the dataset page can then load before the copy finishes and briefly show the old episode count.
 8. **ModelControl:** port the policy execution off `physicalai.runtime` (sync, async with the time-based chunk queue, smoothing). Introduce `ModelControlConfig` and switch `services/runtime_export.py` over to it, along with the export round-trip test. The **inference page** comes back on the new provider, and the `RUNTIME_WIP` flag is deleted. Measure with the oracle model: `actions[i] = f(t0 + i)`.
 9. **Finish:**
    - Check that no `physicalai.runtime` import is left outside `services/runtime_export.py`.
