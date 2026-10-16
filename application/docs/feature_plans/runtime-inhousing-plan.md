@@ -406,6 +406,27 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`, one call per new fra
        - Dependencies stay explicit: unloading the environment unloads the control first. Phase 7 adds dataset and model slots the same way.
    - Not done: robot-specific teleop subclasses (driving the leader, torque changes), and a UI for `MoveControl`. Phase 7 uses `MoveControl` for replay and resets.
 7. **Dataset worker:** spec from the dataset (it can be the first load), recording commands, acked save and discard, the finalize path. The **record page** comes back on the new provider (lifting `RUNTIME_WIP` for it). `ReplayControl` follows in the same phase.
+   - Split into three PRs: 7a backend, 7b the recording viewer UI, 7c `ReplayControl` (backend only; its UI is decided later).
+   - Decided: the environment loads first and owns the store; dataset-first loading is deferred. `load_dataset` checks the dataset's joints and cameras against the environment with `require_compatible`. A dataset with nothing recorded yet takes the environment's shape and records at 30 fps; an existing one keeps its own fps.
+   - 7a done:
+     - `runtime_session/dataset.py` reads a dataset's spec and fps from `meta/info.json` and builds the lerobot features for a new one.
+     - `workers/dataset_worker.py`: `DatasetWorker` is a `ProcessWorker`, so lerobot's writes and encoding stay off the API process's GIL.
+       - It attaches to the store and opens the recording mutation, which copies the dataset into the cache.
+       - It owns its commands and its state. It serves `start_episode`, `save_episode` and `discard_episode` on the bus (the bus's first real use), replies with its new status, and publishes every change on `evt/dataset`.
+       - While an episode is open it samples the store at the dataset fps. A tick with any feature missing is skipped, never padded.
+       - On exit it discards an open episode, then copies the cache back. `ready_timeout_s` and `stop_timeout_s` are 300 s, because killing it mid-copy loses the dataset.
+     - The session is itself a part on the bus, following the same lifecycle pattern as a worker.
+       - `async with session:` hosts the bus and serves the session's own commands: `load_environment`, `unload_environment`, `set_control`, `load_dataset {dataset_id}` and `unload_dataset`. It publishes its state and errors on `evt/session`.
+       - Session commands map their failures to error codes themselves (`_command_error`), and the code travels in the bus's error reply.
+       - The session subscribes to `evt/dataset` before starting the worker and folds what it publishes into `state.dataset` (`{dataset_id, name, fps, is_recording, episodes_recorded}`), so the worker is the single source of truth.
+       - Unloading the environment unloads the control, then the dataset, then the environment. A dead dataset worker sends `worker_failed` and unloads the dataset; what it saved but had not copied back is lost.
+     - Commands are routed by name: a client command `foo` is a request on `rpc/foo` (`command_key`), served by whichever part handles it. The socket (`api/runtime_ws.py`) only forwards.
+       - It reads each command's `command` and `request_id`, puts the raw JSON on the bus, and acks with the reply. It forwards `evt/session`, and samples the store for observations.
+       - It knows nothing about what any command does; the handler validates the payload against the command models.
+       - A command nothing serves right now (unknown, or for a part that is not loaded) fails at once with `command_unavailable` (the bus's `NoResponderError`), rather than waiting out a timeout.
+     - Database lookups for commands (a draft's rows, a dataset in the project) live in `runtime_session/resolve.py` and are handed to the session as `Resolvers`.
+     - `Declaration.close()` takes its zenoh entity out before undeclaring it, so a declaration closed by its owner and by the bus at once is undeclared exactly once.
+     - Ack error codes include `feature_mismatch`, `no_episode` / `episode_open` / `task_required` from the worker, `command_unavailable`, `invalid_command` and `command_timeout`.
 8. **ModelControl:** port the policy execution off `physicalai.runtime` (sync, async with the time-based chunk queue, smoothing). Introduce `ModelControlConfig` and switch `services/runtime_export.py` over to it, along with the export round-trip test. The **inference page** comes back on the new provider, and the `RUNTIME_WIP` flag is deleted. Measure with the oracle model: `actions[i] = f(t0 + i)`.
 9. **Finish:**
    - Check that no `physicalai.runtime` import is left outside `services/runtime_export.py`.
