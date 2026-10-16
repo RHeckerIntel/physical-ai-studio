@@ -276,7 +276,7 @@ class RuntimeSession:
 
 Three levels, each a strict superset of the one below it. Every one uses the same workers and the same Store, so preview, recording and inference all run the same code.
 
-1. **Single camera.** `/api/cameras/ws` opens a `CameraWorker` (and so a `SharedCamera`) writing into a one-camera store, and streams JPEG at the camera fps. It's used by the camera form.
+1. **Single camera.** `/api/cameras/ws` attaches a `SharedCamera` and streams JPEG at the camera fps, with no worker or store. It's used by the camera form.
 2. **Single robot.** `/robots/{id}/observations/ws` opens a `RobotWorker` in **observe-only mode** (it never sends an action, never changes torque) writing into a one-robot store, and streams its joints. It's used by the robot detail page and the robot form.
 3. **Runtime session.** `/api/projects/{project_id}/runtime/ws` creates a `RuntimeSession` for the lifetime of the socket. The UI sends commands to load things into it:
    - the environment form preview loads **only the environment**;
@@ -355,6 +355,15 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`). One sampler task pe
 3. **Event bus:** a typed zenoh wrapper with pub/sub and an RPC with ack and timeout. Tests run against a local-only zenoh config.
    - Done: `runtime_session/bus.py` over a per-session Unix socket. Tests cover pub/sub with a union, request/reply with handler errors and timeouts, a `ProcessWorker` on the bus, and isolation between two sessions. Nothing uses it yet; workers adopt it in Phases 4 and 7.
 4. **Robot and camera workers, plus the environment:** spec from the environment, ported from `runtimev2/environment.py`, and observe-only mode for `RobotWorker`. Move `/api/cameras/ws` and `/robots/{id}/observations/ws` onto the new workers (UI levels 1 and 2). The frontend gets the dumb `CameraView` and `RobotJointsView` plus the standalone hooks. Tested with a fake robot driver, then once on a real SO-101 through `scratch.py`.
+   - Done (backend only):
+     - `workers/robot_worker.py`: `RobotRecipe` (driver config dict, `<joint>.pos` names, device ids) and `RobotWorker`, a `ProcessWorker` that seeds `action` on connect, writes `state`, and sends `action` with the goal_time rule. `observe_only` never sends.
+     - `claim_robot(recipe)` holds physicalai's flock device lock in the parent, so a robot held by another socket, worker or `SharedRobot` owner is refused with `robot_device_already_owned`, and a killed child cannot leave it locked. Shortcut: it imports physicalai's private `_lock` module.
+     - `CameraWorker` writes into a store slot (`camera_image_spec(config)`) instead of its own buffer.
+     - `runtime_session/environment.py`: `describe_environment(env, factory)` returns the spec, the follower recipe and the cameras by dataset key. It refuses anything but one robot and cameras whose keys collide. The leader is left to Phases 5 and 6.
+     - `/robots/{id}/observations/ws` runs an observe-only `RobotWorker` with a one-robot store. `/api/cameras/ws` reads `SharedCamera` directly with no worker or store, because `SharedCamera` already captures in its own publisher process, so a preview only needs `read_latest` and a JPEG encode. It sends each frame once, by `frame.sequence`. Both wire protocols are unchanged, so the UI needed no change.
+     - The worker base shields stop-and-join from cancellation, so a closed websocket still waits for its device to be released.
+   - Moved to Phase 5: the dumb `CameraView` / `RobotJointsView` and the standalone hooks. They only pay off once a provider exists to feed them.
+   - Not done: the real SO-101 check. The robot detail page and robot form exercise the observe-only path on hardware; the driving path has no UI until Phase 6.
 5. **RuntimeSession, registry and session websocket:** load and unload the environment, store lifetime, claims (`device_in_use` for levels 1 and 2, the busy check in `api/robots.py`). Includes the new ws protocol at `/runtime/ws` (commands with acks, `state`, 20 Hz `observation`, binary frames), the new `RuntimeSessionProvider`, and the runtime-sessions footer and list on the registry. The **environment form preview** comes back: its placeholder is removed and its cells read from the provider.
 6. **Controls:** base class, `MoveControl`, `TeleopControl`, and the switching protocol. Teleop buttons are re-enabled.
 7. **Dataset worker:** spec from the dataset (it can be the first load), recording commands, acked save and discard, the finalize path. The **record page** comes back on the new provider (lifting `RUNTIME_WIP` for it). `ReplayControl` follows in the same phase.

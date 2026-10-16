@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -48,14 +48,15 @@ def test_stream_endpoint_passes_is_locked_for_a_claimed_fingerprint() -> None:
     client = _client(claims)
     try:
         with (
-            patch("api.camera.CameraWorker") as worker_cls,
+            patch("api.camera.build_shared_camera") as build,
+            patch("api.camera.Rate") as rate_cls,
             patch("utils.jpeg.encode_jpeg_rgb", return_value=b"jpeg"),
         ):
-            worker = worker_cls.return_value
-            worker.get_frame.side_effect = WebSocketDisconnect()
+            rate_cls.return_value.sleep = AsyncMock(side_effect=WebSocketDisconnect())
             with client.websocket_connect(f"/api/cameras/ws?camera={quote(_camera_query())}"):
                 pass
-            assert worker_cls.call_args.kwargs["is_locked"] is True
+            assert build.call_args.kwargs["overwrite_settings"] is False
+            build.return_value.disconnect.assert_called_once()
     finally:
         app.dependency_overrides.clear()
 
@@ -64,13 +65,13 @@ def test_stream_endpoint_is_unlocked_when_the_camera_is_unclaimed() -> None:
     client = _client(CameraClaimRegistry())
     try:
         with (
-            patch("api.camera.CameraWorker") as worker_cls,
+            patch("api.camera.build_shared_camera") as build,
+            patch("api.camera.Rate") as rate_cls,
             patch("utils.jpeg.encode_jpeg_rgb", return_value=b"jpeg"),
         ):
-            worker = worker_cls.return_value
-            worker.get_frame.side_effect = WebSocketDisconnect()
+            rate_cls.return_value.sleep = AsyncMock(side_effect=WebSocketDisconnect())
             with client.websocket_connect(f"/api/cameras/ws?camera={quote(_camera_query())}"):
                 pass
-            assert worker_cls.call_args.kwargs["is_locked"] is False
+            assert build.call_args.kwargs["overwrite_settings"] is True
     finally:
         app.dependency_overrides.clear()

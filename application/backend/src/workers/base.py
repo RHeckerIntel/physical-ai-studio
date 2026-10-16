@@ -31,6 +31,7 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Self, cast
 
+import anyio
 from loguru import logger
 
 from utils.multiprocessing import ensure_spawn_start_method
@@ -218,10 +219,12 @@ class _Worker[C](ABC):
 
     async def _stop_and_join(self) -> None:
         self._stop_event.set()
-        await asyncio.to_thread(self.join, self.stop_timeout_s)
-        if self.is_alive():
-            logger.warning("Worker {} did not stop within {:.0f}s", self.name, self.stop_timeout_s)
-            self._kill()
+        # Shielded: a cancelled parent (a closed websocket) still waits for the device to be released.
+        with anyio.CancelScope(shield=True):
+            await asyncio.to_thread(self.join, self.stop_timeout_s)
+            if self.is_alive():
+                logger.warning("Worker {} did not stop within {:.0f}s", self.name, self.stop_timeout_s)
+                self._kill()
 
 
 class ThreadWorker[C](threading.Thread, _Worker[C], ABC):

@@ -1,11 +1,12 @@
 import asyncio
-import ctypes
-from multiprocessing import Array
+import uuid
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
-from workers.camera_worker import CameraWorker
+from runtime_session.store import FeatureSpec, Store
+from workers.camera_worker import CameraWorker, camera_image_spec
 
 
 def _make_config(width=640, height=480, fps=30):
@@ -22,122 +23,73 @@ def _make_config(width=640, height=480, fps=30):
     )
 
 
-def _make_frame(height: int = 480, width: int = 640):
+def _make_frame(height: int = 480, width: int = 640, value: int = 0, timestamp: float = 1.0):
     mock_frame = MagicMock()
-    mock_frame.data = np.zeros((height, width, 3), dtype=np.uint8)
+    mock_frame.data = np.full((height, width, 3), value, dtype=np.uint8)
+    mock_frame.timestamp = timestamp
     return mock_frame
 
 
-def _make_camera_worker(config, **kwargs):
-    return CameraWorker(config, **kwargs)
+@pytest.fixture
+def store():
+    store = Store.create(FeatureSpec((), {"cam": camera_image_spec(_make_config())}), uuid.uuid4().hex)
+    yield store
+    store.unlink()
+
+
+def _enter_and_leave(worker: CameraWorker, check=lambda camera: None) -> None:
+    async def run() -> None:
+        async with worker.lifecycle() as camera:
+            check(camera)
+
+    asyncio.run(run())
 
 
 class TestCameraWorker:
-    def test_build_shared_camera_called(self):
+    def test_lifecycle_builds_and_connects_the_camera(self, store):
         config = _make_config()
         with patch("workers.camera_worker.build_shared_camera") as mock_build:
-            mock_build.return_value = MagicMock()
-            worker = _make_camera_worker(config)
-            mock_build.assert_called_once_with(config=config, validate_on_connect=False, overwrite_settings=True)
-            assert worker.camera is not None
-
-    def test_build_shared_camera_called_when_locked(self):
-        config = _make_config()
-        with patch("workers.camera_worker.build_shared_camera") as mock_build:
-            mock_build.return_value = MagicMock()
-            _make_camera_worker(config, is_locked=True)
-            mock_build.assert_called_once_with(config=config, validate_on_connect=False, overwrite_settings=False)
-
-    def test_get_frame_returns_zeros_initially(self):
-        config = _make_config()
-        with patch("workers.camera_worker.build_shared_camera") as mock_build:
-            mock_build.return_value = MagicMock()
-            worker = _make_camera_worker(config)
-            frame = worker.get_frame()
-            assert frame.shape == (480, 640, 3)
-            assert frame.dtype == np.uint8
-            assert np.all(frame == 0)
-
-    def test_set_frame_stores_in_buffer(self):
-        config = _make_config()
-        with patch("workers.camera_worker.build_shared_camera") as mock_build:
-            mock_build.return_value = MagicMock()
-            worker = _make_camera_worker(config)
-            data = np.ones((480, 640, 3), dtype=np.uint8) * 42
-            worker._set_frame(data)
-            np.testing.assert_array_equal(worker.get_frame(), data)
-
-    def test_set_frame_resizes_if_wrong_shape(self):
-        config = _make_config()
-        with patch("workers.camera_worker.build_shared_camera") as mock_build:
-            mock_build.return_value = MagicMock()
-            worker = _make_camera_worker(config)
-            worker._set_frame(np.zeros((240, 320, 3), dtype=np.uint8))
-            assert worker.get_frame().shape == (480, 640, 3)
-
-    def test_frame_from_buffer(self):
-        buf = Array(ctypes.c_uint8, 640 * 480 * 3)
-        np.frombuffer(buf.get_obj(), dtype=np.uint8)[:] = 7
-        frame = CameraWorker.frame_from_buffer(buf.get_obj(), 640, 480)
-        assert frame.shape == (480, 640, 3)
-        assert np.all(frame == 7)
-
-    def test_should_stop_reflects_stop_event(self):
-        config = _make_config()
-        with patch("workers.camera_worker.build_shared_camera") as mock_build:
-            mock_build.return_value = MagicMock()
-            worker = _make_camera_worker(config)
-            assert not worker.should_stop()
-            worker.request_stop()
-            assert worker.should_stop()
-
-    def test_lifecycle_connects_and_disconnects_camera(self):
-        config = _make_config()
-        with patch("workers.camera_worker.build_shared_camera") as mock_build:
-            mock_cam = MagicMock()
+            mock_cam = mock_build.return_value
             mock_cam.is_connected = True
-            mock_build.return_value = mock_cam
-            worker = _make_camera_worker(config)
+            worker = CameraWorker(config, store, "cam")
+            mock_build.assert_not_called()
 
-            async def enter_and_leave() -> None:
-                async with worker.lifecycle():
-                    mock_cam.connect.assert_called_once()
-                    mock_cam.disconnect.assert_not_called()
+            def check(camera) -> None:
+                assert camera is mock_cam
+                mock_cam.connect.assert_called_once()
+                mock_cam.disconnect.assert_not_called()
 
-            asyncio.run(enter_and_leave())
+            _enter_and_leave(worker, check)
+            mock_build.assert_called_once_with(config=config, validate_on_connect=False, overwrite_settings=True)
             mock_cam.disconnect.assert_called_once()
 
-    def test_lifecycle_skips_disconnect_if_not_connected(self):
+    def test_a_locked_camera_keeps_its_settings(self, store):
         config = _make_config()
         with patch("workers.camera_worker.build_shared_camera") as mock_build:
-            mock_cam = MagicMock()
-            mock_cam.is_connected = False
-            mock_build.return_value = mock_cam
-            worker = _make_camera_worker(config)
+            _enter_and_leave(CameraWorker(config, store, "cam", is_locked=True))
+            mock_build.assert_called_once_with(config=config, validate_on_connect=False, overwrite_settings=False)
 
-            async def enter_and_leave() -> None:
-                async with worker.lifecycle():
-                    pass
-
-            asyncio.run(enter_and_leave())
-            mock_cam.disconnect.assert_not_called()
-
-    def test_run_loop_reads_frames_until_stopped(self):
-        config = _make_config()
+    def test_lifecycle_skips_disconnect_if_not_connected(self, store):
         with patch("workers.camera_worker.build_shared_camera") as mock_build:
-            mock_cam = MagicMock()
-            mock_build.return_value = mock_cam
-            worker = _make_camera_worker(config)
-            call_count = 0
+            mock_build.return_value.is_connected = False
+            _enter_and_leave(CameraWorker(_make_config(), store, "cam"))
+            mock_build.return_value.disconnect.assert_not_called()
 
-            def read_latest():
-                nonlocal call_count
-                call_count += 1
-                if call_count >= 3:
-                    worker.request_stop()
-                return _make_frame()
+    def test_run_loop_writes_frames_into_the_store_until_stopped(self, store):
+        worker = CameraWorker(_make_config(), store, "cam")
+        frames = [_make_frame(value=1, timestamp=1.0), _make_frame(240, 320, value=2, timestamp=2.0)]
 
-            mock_cam.read_latest.side_effect = read_latest
-            asyncio.run(worker.run_loop(None))
+        def read_latest():
+            if len(frames) == 1:
+                worker.request_stop()
+            return frames.pop(0)
 
-            assert call_count == 3
+        camera = MagicMock()
+        camera.read_latest.side_effect = read_latest
+        asyncio.run(worker.run_loop(camera))
+
+        sample = store.read_observation("cam")
+        assert sample.timestamp == 2.0
+        # A frame at another resolution is resized to the slot.
+        assert sample.value.shape == (480, 640, 3)
+        assert np.all(sample.value == 2)

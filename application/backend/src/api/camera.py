@@ -1,8 +1,10 @@
+import asyncio
 import json
 from collections import defaultdict
 from functools import cache
 from typing import Annotated
 
+import anyio
 from fastapi import APIRouter, Depends, Query, WebSocket
 from fastapi.responses import Response
 from fastapi.websockets import WebSocketDisconnect
@@ -11,7 +13,7 @@ from api.dependencies import CameraClaimRegistryDep
 from schemas.camera import SupportedCameraFormat
 from schemas.project_camera import Camera as ProjectCamera
 from schemas.project_camera import CameraAdapter
-from workers.camera_worker import CameraWorker
+from utils.camera_factory import build_shared_camera
 from workers.rate import Rate
 
 router = APIRouter(prefix="/api/cameras", tags=["Cameras"])
@@ -121,11 +123,25 @@ async def camera_websocket(
     try:
         if camera.fingerprint is None:
             raise ValueError("Camera must be reselected")
-        worker = CameraWorker(camera, is_locked=claims.holder_of(camera.fingerprint) is not None)
-        async with worker:
-            rate = Rate(camera.payload.fps, name=worker.name)
+        # SharedCamera already captures in its own publisher process; a preview needs no worker.
+        shared_camera = build_shared_camera(
+            config=camera,
+            validate_on_connect=False,
+            overwrite_settings=claims.holder_of(camera.fingerprint) is None,
+        )
+        await asyncio.to_thread(shared_camera.connect)
+        try:
+            rate = Rate(camera.payload.fps, name=f"camera-preview-{camera.name}")
+            sent: int | None = None
             while True:
-                await websocket.send_bytes(encode_jpeg_rgb(worker.get_frame()))
+                frame = await asyncio.to_thread(shared_camera.read_latest)
+                if frame.sequence != sent:
+                    await websocket.send_bytes(await asyncio.to_thread(encode_jpeg_rgb, frame.data))
+                    sent = frame.sequence
                 await rate.sleep()
+        finally:
+            # Shielded: a cancelled socket task must still detach from the publisher.
+            with anyio.CancelScope(shield=True):
+                await asyncio.to_thread(shared_camera.disconnect)
     except WebSocketDisconnect:
         pass
