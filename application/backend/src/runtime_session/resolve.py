@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 from exceptions import ResourceNotFoundError, ResourceType
+from runtime_session.environment import UNSAVED_ENVIRONMENT_ID
 from runtime_session.session import Resolvers
 from schemas.environment import (
     EnvironmentWithRelations,
@@ -15,6 +15,8 @@ from schemas.environment import (
 )
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from schemas.dataset import Dataset
     from schemas.runtime_session import EnvironmentDraft
     from services import DatasetService, RobotService
@@ -36,7 +38,7 @@ def project_resolvers(
             follower = await robots.get_robot_by_id(project_id, robot.robot_id)
             configured.append(RobotWithTeleoperator(robot=follower, tele_operator=teleoperator))
         return EnvironmentWithRelations(
-            id=UUID(int=0),  # unused: a session does not care whether the environment is saved
+            id=draft.id or UNSAVED_ENVIRONMENT_ID,
             name=draft.name,
             robots=configured,
             cameras=[await cameras.get_camera_by_id(project_id, camera.camera_id) for camera in draft.cameras],

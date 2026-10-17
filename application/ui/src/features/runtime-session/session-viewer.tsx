@@ -1,4 +1,4 @@
-import { ReactNode, Suspense, useEffect, useRef } from 'react';
+import { ReactNode, Suspense, useEffect, useRef, useState } from 'react';
 
 import { Button, Flex, Heading, Loading, ProgressCircle, StatusLight, Text, View } from '@geti-ui/ui';
 import {
@@ -14,16 +14,21 @@ import { physicalAiTheme } from '../dockview';
 import { InlineAlert } from '../robots/setup-wizard/shared/inline-alert';
 import { CameraCell } from './cells/camera-cell';
 import { RobotCell } from './cells/robot-cell';
-import { useRuntimeSession } from './runtime-session-provider';
+import { failureOf, useRuntimeSession } from './runtime-session-provider';
 
 /** Something a page waits for before its session is usable, such as the environment or a dataset. */
 export interface SessionPart {
     label: string;
     isLoaded: boolean;
+    /** Why it failed; it stays unloaded until it is loaded again. */
+    error?: string | null;
 }
 
 const components = {
-    follower: (props: IDockviewPanelProps<{ robot_id: string }>) => <RobotCell follower_id={props.params.robot_id} />,
+    // The workspace's side bar has the Teleoperate switch.
+    follower: (props: IDockviewPanelProps<{ robot_id: string }>) => (
+        <RobotCell follower_id={props.params.robot_id} showTeleop={false} />
+    ),
     camera: (props: IDockviewPanelProps<{ camera_id: string }>) => <CameraCell camera_id={props.params.camera_id} />,
 } satisfies IDockviewReactProps['components'];
 
@@ -86,15 +91,18 @@ const Initializing = ({ parts, cancelHref }: { parts: SessionPart[]; cancelHref:
         <Flex width='100%' height={'100%'} alignItems={'center'} justifyContent={'center'} direction={'column'}>
             <Heading level={2}>
                 <Text>Initializing</Text>
-                {error === null && (
+                {error === null && !parts.some((part) => part.error) && (
                     <ProgressCircle marginStart='size-200' size='S' isIndeterminate alignSelf={'center'} />
                 )}
             </Heading>
             <Flex direction='column' margin='size-200' gap='size-100'>
-                {parts.map(({ label, isLoaded }) => (
-                    <StatusLight key={label} variant={isLoaded ? 'positive' : 'yellow'}>
-                        {label}
-                    </StatusLight>
+                {parts.map(({ label, isLoaded, error: partError }) => (
+                    <Flex key={label} direction='column' gap='size-50'>
+                        <StatusLight variant={isLoaded ? 'positive' : partError ? 'negative' : 'yellow'}>
+                            {label}
+                        </StatusLight>
+                        {partError && <InlineAlert variant='error'>{partError}</InlineAlert>}
+                    </Flex>
                 ))}
                 {error !== null && <InlineAlert variant='error'>{error.message}</InlineAlert>}
             </Flex>
@@ -106,25 +114,41 @@ const Initializing = ({ parts, cancelHref }: { parts: SessionPart[]; cancelHref:
 };
 
 /**
- * A session's robot and cameras in a dock, under the page's own toolbar.
+ * A session's robot and cameras in a dock, under an optional toolbar.
  *
- * Shared by the pages that run a session on a robot (recording, and inference). Until the
- * environment and every one of ``parts`` is loaded it shows what it is waiting for instead.
+ * The middle of the session workspace. Until the environment and every one of ``parts`` is
+ * loaded it shows what it is waiting for instead. Once it has shown the dock, it keeps showing
+ * it while a part fails or reloads; the parts panel says what is wrong.
  */
 export const SessionViewer = ({
     toolbar,
     parts,
     cancelHref,
 }: {
-    toolbar: ReactNode;
+    toolbar?: ReactNode;
     parts: SessionPart[];
     cancelHref: string;
 }) => {
-    const { state } = useRuntimeSession();
+    const { state, statuses } = useRuntimeSession();
     const environment = state?.environment;
-    const allParts = [{ label: 'Environment', isLoaded: environment != null }, ...parts];
+    const environmentFailure = failureOf(statuses, 'environment');
+    const allParts = [
+        {
+            label: 'Environment',
+            isLoaded: environment != null && environmentFailure === null,
+            error: environmentFailure,
+        },
+        ...parts,
+    ];
 
-    if (environment == null || allParts.some((part) => !part.isLoaded)) {
+    const isReady = environment != null && allParts.every((part) => part.isLoaded);
+    const [hasStarted, setHasStarted] = useState(false);
+    // Adjusted while rendering: started once ready, and over once the environment is unloaded.
+    if (hasStarted !== (isReady || (hasStarted && environment != null))) {
+        setHasStarted(!hasStarted);
+    }
+
+    if (environment == null || !(isReady || hasStarted)) {
         return <Initializing parts={allParts} cancelHref={cancelHref} />;
     }
 

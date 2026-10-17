@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import AsyncExitStack
 from typing import Any
@@ -12,11 +13,11 @@ import numpy as np
 import pytest
 
 from runtime_session import session as runtime_session
-from runtime_session.bus import Subscription
+from runtime_session.bus import STATUSES, Subscription
 from runtime_session.registry import RuntimeSessionRegistry
 from runtime_session.session import Resolvers, RuntimeSession
 from schemas.environment import EnvironmentWithRelations
-from schemas.runtime_session import SessionEvent
+from schemas.runtime_session import SessionEvent, StatusMessage
 from services.camera_claims import CameraClaimRegistry
 from tests.workers.fake_robot import FakeRobot
 
@@ -119,3 +120,16 @@ async def _unresolvable(_what: object) -> Any:
 def subscribe_events(session: RuntimeSession) -> Subscription[Any]:
     """What the session publishes for its socket, as the socket subscribes to it."""
     return session.bus.subscribe(runtime_session.EVENTS, SessionEvent)
+
+
+def subscribe_statuses(session: RuntimeSession) -> Subscription[StatusMessage]:
+    """Every part's and device's status, as the socket subscribes to them."""
+    return session.bus.subscribe(STATUSES, StatusMessage)
+
+
+async def next_status(statuses: Subscription[StatusMessage], component: str, within: float = 15.0) -> StatusMessage:
+    """The next status of ``component`` that is not ``starting`` or ``running``."""
+    async with asyncio.timeout(within):
+        while (status := await statuses.next()).component != component or status.state in {"starting", "running"}:
+            pass
+    return status

@@ -6,9 +6,12 @@ from the driver, not the database: a robot row stores a type and a port, and
 only the driver for that type knows its joints and their order. Building a
 driver does not touch the device; only ``connect()`` does.
 
-``connect_environment`` then holds it: the device locks, the store, the
-follower's ``RobotWorker``, a ``CameraWorker`` per camera and the leader as a
-plain driver, all connected in parallel and released in reverse.
+An :class:`Environment` then holds it: the device locks, the follower's
+``RobotWorker``, a ``CameraWorker`` per camera and the leader as a plain
+driver, all connected in parallel and released in reverse. They write to the
+session's store, which outlives them. It has its own connection to the
+session's bus, where its devices report as ``environment/<device>`` and it
+reports as ``environment``.
 """
 
 from __future__ import annotations
@@ -16,31 +19,39 @@ from __future__ import annotations
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Self, cast
+from uuid import UUID
 
 import anyio
+from loguru import logger
 
+from exceptions import RuntimeSessionCommandError
 from robots.features import sanitize_camera_name
+from runtime_session.bus import Bus, Subscription, publish_status, status_key
 from runtime_session.store import FeatureSpec, Store
-from schemas.runtime_session import SessionCamera, SessionEnvironment
+from schemas.runtime_session import CommandDone, ReloadEnvironment, SessionCamera, SessionEnvironment, StatusMessage
+from workers.base import WorkerStartupError
 from workers.camera_worker import CameraWorker, camera_image_spec
 from workers.robot_worker import DEFAULT_ROBOT_HZ, RobotRecipe, RobotWorker, claim_robot
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping
     from contextlib import AbstractAsyncContextManager
-    from uuid import UUID
 
     from physicalai.robot import Robot
 
     from robots.robot_client_factory import RobotClientFactory
     from schemas.environment import EnvironmentWithRelations
     from schemas.project_camera import Camera
-    from workers.base import ProcessWorker, ThreadWorker
+
+
+UNSAVED_ENVIRONMENT_ID = UUID(int=0)
+"""The id an environment from the form carries, which is not saved yet."""
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentDescription:
+    environment_id: UUID | None
     name: str
     robot_names: Mapping[UUID, str]
     """Display names of the follower and leader, for claim errors."""
@@ -54,6 +65,7 @@ class EnvironmentDescription:
     def session_environment(self) -> SessionEnvironment:
         """What the session's ``state`` message says about this environment."""
         return SessionEnvironment(
+            environment_id=self.environment_id,
             name=self.name,
             robot_id=self.follower.robot_id,
             leader_id=self.leader.robot_id if self.leader is not None else None,
@@ -103,6 +115,7 @@ async def describe_environment(
         cameras[key] = camera
     spec = FeatureSpec(follower.joint_names, {key: camera_image_spec(camera) for key, camera in cameras.items()})
     return EnvironmentDescription(
+        environment_id=None if environment.id == UNSAVED_ENVIRONMENT_ID else environment.id,
         name=environment.name,
         robot_names=robot_names,
         spec=spec,
@@ -112,38 +125,137 @@ async def describe_environment(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectedEnvironment:
-    store: Store
-    leader: Robot | None
-    """Connected, for controls to borrow."""
-    workers: Sequence[ThreadWorker[Any] | ProcessWorker[Any]]
-    """The follower's robot worker and the camera workers, for the session to watch."""
+COMPONENT = "environment"
+"""What the environment reports as; its devices report as ``environment/<device>``."""
 
 
-@asynccontextmanager
-async def connect_environment(
-    description: EnvironmentDescription, session_id: str
-) -> AsyncIterator[ConnectedEnvironment]:
-    """Hold the environment's devices and store; on any failure, release what was acquired and raise.
+RELOAD = "rpc/environment/reload"
+"""Where the environment takes a request to reconnect its devices."""
 
-    Raises:
-        RobotDeviceAlreadyOwnedError: Something outside Studio's sessions holds a robot.
-        WorkerStartupError: A device failed to connect.
+
+class Environment:
+    """An environment's devices, writing to the session's store.
+
+    ``async with`` joins the bus, answers ``RELOAD`` and tries to connect them,
+    until it is left, which releases them. A device that fails, connecting or
+    later, reports it on the bus. Nothing is recoverable yet, so the environment
+    then reports itself failed and keeps holding what it has until it is
+    reloaded or released. A reload connects the devices again in place.
     """
-    async with AsyncExitStack() as stack:
-        stack.enter_context(claim_robot(description.follower))
-        if description.leader is not None:
-            stack.enter_context(claim_robot(description.leader))
-        store = Store.create(description.spec, session_id)
-        stack.callback(store.unlink)
 
-        follower = RobotWorker(description.follower, store.name, store.spec, hz=DEFAULT_ROBOT_HZ)
-        cameras = [CameraWorker(row, store, key) for key, row in description.cameras.items()]
-        leader = [_connected_driver(description.leader)] if description.leader is not None else []
-        started = await _enter_concurrently(stack, [follower, *cameras, *leader])
+    def __init__(self, description: EnvironmentDescription, session_id: str, store: Store) -> None:
+        self.description = description
+        self.session_id = session_id
+        self.store = store
+        self.leader: Robot | None = None
+        """Connected, for controls to borrow; ``None`` while the devices are not connected."""
+        self._bus: Bus | None = None
+        self._devices: AsyncExitStack | None = None
 
-        yield ConnectedEnvironment(store=store, leader=started[-1] if leader else None, workers=(follower, *cameras))
+    async def __aenter__(self) -> Self:
+        """Join the bus and try to connect the devices; if that fails, it is reported failed, to reload."""
+        self._bus = Bus.join(self.session_id)
+        self._bus.serve(RELOAD, ReloadEnvironment, self.reload)  # undeclared with the bus
+        try:
+            await self._connect()
+        except Exception:
+            logger.exception("Environment {!r} could not connect", self.description.name)
+        except BaseException:
+            self._bus.close()
+            raise
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        try:
+            await self._disconnect()
+        finally:
+            publish_status(self.bus, COMPONENT, "stopped")
+            self.bus.close()
+
+    @property
+    def bus(self) -> Bus:
+        """The environment's own connection to the session's bus, while it is entered."""
+        if self._bus is None:
+            raise RuntimeError("The environment is not entered")
+        return self._bus
+
+    async def reload(self, _request: ReloadEnvironment | None = None) -> CommandDone:
+        """Disconnect the devices and connect them again. If that fails, stay as failed, to try again.
+
+        Raises:
+            RuntimeSessionCommandError: A device failed to connect.
+        """
+        await self._disconnect()
+        try:
+            await self._connect()
+        except Exception as error:
+            raise RuntimeSessionCommandError(_reason(error), error_code="device_connection_failed") from error
+        return CommandDone()
+
+    async def _connect(self) -> None:
+        """Connect every device; on any failure, release what was acquired, report it and raise.
+
+        Raises:
+            RobotDeviceAlreadyOwnedError: Something outside Studio's sessions holds a robot.
+            WorkerStartupError: A device failed to connect.
+        """
+        description, store = self.description, self.store
+        publish_status(self.bus, COMPONENT, "starting")
+        async with AsyncExitStack() as stack:
+            try:
+                # Subscribed before any device starts, so no failure is missed; anew each time, so
+                # what the devices said before a reload is not heard again.
+                devices = stack.enter_context(self.bus.subscribe(status_key(f"{COMPONENT}/*"), StatusMessage))
+                stack.enter_context(claim_robot(description.follower))
+                if description.leader is not None:
+                    stack.enter_context(claim_robot(description.leader))
+                # shortcut: a killed robot process reports nothing; await its ``wait_stopped()`` if that happens.
+                follower = RobotWorker(
+                    description.follower,
+                    store.name,
+                    store.spec,
+                    hz=DEFAULT_ROBOT_HZ,
+                    session_id=self.session_id,
+                    component=f"{COMPONENT}/follower",
+                )
+                managers: dict[str, AbstractAsyncContextManager[Any]] = {"follower": follower}
+                for key, row in description.cameras.items():
+                    managers[key] = CameraWorker(
+                        row, store, key, session_id=self.session_id, component=f"{COMPONENT}/{key}"
+                    )
+                if description.leader is not None:
+                    managers["leader"] = _connected_driver(description.leader)
+                started = await _enter_concurrently(stack, self.bus, managers)
+            except Exception as error:
+                publish_status(self.bus, COMPONENT, "failed", _reason(error))
+                raise
+            handler = asyncio.create_task(self._handle_failures(devices))
+            stack.callback(handler.cancel)
+            self.leader = started.get("leader")
+            self._devices = stack.pop_all()
+        publish_status(self.bus, COMPONENT, "running")
+
+    async def _disconnect(self) -> None:
+        """Release the devices, if they are connected."""
+        devices, self._devices, self.leader = self._devices, None, None
+        if devices is not None:
+            await devices.aclose()
+
+    async def _handle_failures(self, devices: Subscription[StatusMessage]) -> None:
+        """Recover a device that failed, or fail with it. Nothing is recoverable yet."""
+        while True:
+            status = await devices.next()
+            if status.state == "failed":
+                device = status.component.removeprefix(f"{COMPONENT}/")
+                logger.error("Environment {!r}: {} failed: {}", self.description.name, device, status.error)
+                publish_status(self.bus, COMPONENT, "failed", f"{device}: {status.error}")
+                return
+
+
+def _reason(error: Exception) -> str:
+    if isinstance(error, WorkerStartupError):
+        return error.reason
+    return getattr(error, "message", None) or str(error) or type(error).__name__
 
 
 @asynccontextmanager
@@ -160,13 +272,20 @@ async def _connected_driver(recipe: RobotRecipe) -> AsyncIterator[Robot]:
             await asyncio.to_thread(driver.disconnect)
 
 
-async def _enter_concurrently(stack: AsyncExitStack, managers: Sequence[AbstractAsyncContextManager[Any]]) -> list[Any]:
-    """Enter every manager at once; on any failure, exit the ones that started and raise the first error."""
-    results = await asyncio.gather(*(manager.__aenter__() for manager in managers), return_exceptions=True)
-    for manager, result in zip(managers, results, strict=True):
-        if not isinstance(result, BaseException):
-            stack.push_async_exit(manager)
+async def _enter_concurrently(
+    stack: AsyncExitStack, bus: Bus, devices: Mapping[str, AbstractAsyncContextManager[Any]]
+) -> dict[str, Any]:
+    """Enter every device at once, reporting each; on a failure, exit those that started and raise the first error."""
+    for name in devices:
+        publish_status(bus, f"{COMPONENT}/{name}", "starting")
+    results = await asyncio.gather(*(device.__aenter__() for device in devices.values()), return_exceptions=True)
+    for (name, device), result in zip(devices.items(), results, strict=True):
+        if isinstance(result, Exception):
+            publish_status(bus, f"{COMPONENT}/{name}", "failed", _reason(result))
+        elif not isinstance(result, BaseException):
+            stack.push_async_exit(device)
+            publish_status(bus, f"{COMPONENT}/{name}", "running")
     errors = [result for result in results if isinstance(result, BaseException)]
     if errors:
         raise errors[0]
-    return results
+    return dict(zip(devices, results, strict=True))

@@ -197,7 +197,7 @@ The joint names come namespaced the way the dataset stores them (e.g. `shoulder_
   - **Fallback:** if tearing turns out to matter somewhere (for example in recorded frames), add a seqlock or extra slots for that feature only. Readers don't need to change for that.
 - **Timestamps:** `time.monotonic()`, which is system-wide on Linux and comparable across processes. NaN means "not written yet".
 - **Task:** too awkward to keep in shm, since it is a variable-length string. Put it in session state and broadcast changes over zenoh; the dataset and model workers cache the latest value.
-- **Lifetime:** `RuntimeSession` creates and unlinks the block, and children attach by name plus spec. At backend startup, sweep `/dev/shm/pai-*` blocks whose session no longer exists, because a SIGKILLed session leaves its block behind.
+- **Lifetime:** `RuntimeSession` creates and unlinks the block, and children attach by name plus spec. A block is named `pai-<creator pid>-<session id>`. At backend startup, sweep `/dev/shm/pai-*` blocks whose creating process is gone, because a SIGKILLed backend leaves its blocks behind. Blocks of a live process are left alone: an earlier sweep removed every block on the host, so the backend test suite deleted a running dev server's live session store.
 - **First loaded defines the shape:**
   - an environment supplies the robot and cameras;
   - a dataset supplies the state/action names and camera shapes;
@@ -207,7 +207,7 @@ The joint names come namespaced the way the dataset stores them (e.g. `shoulder_
 
 ## Event bus (zenoh)
 
-- One zenoh session per process, peer mode, scouting off. The session process hosts it on a Unix socket (`<tmp>/pai-{session_id}.sock`) and its worker processes connect only to that socket, so nothing listens on the network and sessions cannot hear each other. `eclipse-zenoh` is already a direct dependency.
+- One zenoh session per process, scouting off. The session process hosts it as a router on a Unix socket (`<tmp>/pai-{session_id}.sock`) and its workers connect to that socket as clients, so they hear each other through it. Nothing listens on the network and sessions cannot hear each other. `eclipse-zenoh` is already a direct dependency.
 - Most traffic never touches zenoh: the websocket calls the session directly, and controls are threads in the session's process. Zenoh carries what crosses into worker processes, and events controls listen to.
 - Key layout is `pai/{session_id}/…`:
   - `cmd/{component}`: commands into a component (pub/sub, pydantic payloads, the same discriminated-union style as `contract.py`).
@@ -312,6 +312,24 @@ Server → client:
 
 JPEG encoding runs off the event loop (`asyncio.to_thread`, one call per new frame, in parallel). One sampler task per session reads the store and sends one observation per tick.
 
+### Session workspace
+
+The record and inference pages become one session workspace: the dock (the follower and the cameras, `SessionViewer`) in the middle, and a side bar on the right whose content depends on the mode.
+
+- **Entry points stay as routes.** "Add episode" on a dataset opens the workspace with its environment and dataset, in record mode. "Run model" (Phase 8) opens it with the environment and the model, in inference mode. An entry point only decides what is loaded first and which mode is selected. The environment form keeps its own preview.
+- **Modes, not free-standing sections.** Each mode is a deliberate combination: the parts it needs, the control it drives the follower with, and its own panel.
+  - **Record:** needs an environment and a dataset. The control is hold or teleop (the Teleoperate switch moves here from the robot cell). The panel has the task, start / accept / discard with the hotkeys, the timer, and the episodes recorded this session.
+  - **Replay (7c):** needs an environment and a dataset. The control is `ReplayControl`. The panel has the episode selection (a dropdown or index field showing each episode's length; no thumbnails), play / stop and progress.
+  - **Inference (Phase 8):** needs an environment and a model. The control is `ModelControl`. The panel has the device, the task prompt, play / stop and the runtime export.
+  - Switching mode returns the follower to hold first.
+  - Combinations get their own mode when they are designed. Human in the loop (recording while a model runs, a human taking over) needs more than two panels side by side to be smooth, so it will be a mode of its own, not record plus inference.
+- **Parts panel**, at the top of the side bar in every mode. The environment, dataset and model are each shown with their status (loading, loaded, error), with **reload**, **swap** (a picker of the project's environments, datasets or models) and **unload**.
+  - **Swapping can change the feature spec.** A load that would conflict with what is loaded fails with `incompatible_parts`, listing each conflicting part and why (the `Mismatch` reasons), and changes nothing. The UI shows that as a confirm dialog ("Unload dataset *X*, recorded with other cameras?") and sends the load again with `unload_incompatible: true`.
+  - **Swapping the environment** unloads the old one with its control and dataset, loads the new one, and loads the dataset again if it is compatible with the new environment. A dataset is tied to its environment, so this can be confusing, but that is left to the user.
+- **Episodes recorded this session can be replayed** without finishing the recording: the dataset worker's cache holds the dataset copied in at load plus every episode saved since. The worker serves `rpc/episode_actions {episode_index}` (that episode's action trajectory and fps), and `ReplayControl` plays it in the session process. It uses the same grace move to the first frame as teleop.
+  - **Risk to check first:** that lerobot can read an episode's actions back from a dataset still open for writing, after `save_episode`. Only the parquet is needed, not the video.
+  - **Fallback:** replay only the episodes already in the dataset, plus a "Finish recording" action that copies the cache back.
+
 ### Frontend
 
 - **One `RuntimeSessionProvider`, rewritten.**
@@ -370,8 +388,8 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`, one call per new fra
 5. **RuntimeSession, registry and session websocket:** load and unload the environment, store lifetime, claims (`device_in_use` for levels 1 and 2, the busy check in `api/robots.py`). Includes the new ws protocol at `/runtime/ws` (commands with acks, `state`, and a 20 Hz binary `observation` carrying joints and frames), the new `RuntimeSessionProvider`, and the runtime-sessions footer and list on the registry. The **environment form preview** comes back: its placeholder is removed and its cells read from the provider.
    - Done:
      - `runtime_session/session.py`: `RuntimeSession` with `load_environment` / `unload_environment` / `close`.
-       - Loading claims the robots in the registry, pins the cameras in `CameraClaimRegistry` and takes the device locks. It then creates the store and connects the follower `RobotWorker`, the `CameraWorker`s and the leader driver in parallel.
-       - If any step fails, everything already acquired is released. A worker that dies sends `worker_failed` and unloads the environment; the session survives.
+       - Loading claims the robots in the registry, pins the cameras in `CameraClaimRegistry` and takes the device locks. It then creates the store, or keeps the session's store when the spec is the same, and connects the follower `RobotWorker`, the `CameraWorker`s and the leader driver in parallel.
+       - If any step fails, everything already acquired is released. An `Environment`, entered with `async with`, has its own bus connection and holds the claims, the follower's `RobotWorker`, the camera workers and the leader driver. Statuses (`StatusMessage`: `starting`, `running`, `failed` or `stopped`, with `error`) go on `evt/status/<component>`: `environment`, `environment/follower`, `environment/leader`, `environment/<camera key>`, `control`, `dataset`. The environment reports each device starting, running or failing to start; a running robot or camera worker joins the bus itself and reports its own failure. The environment listens for those and handles the failure or fails with it: nothing is recoverable yet, so it reports `environment` failed and keeps holding its devices; it reports `stopped` once released. The session listens on `evt/status/environment` only: for a failure it stops the control and discards an open episode, and leaves the environment loaded. The session owns the store, so the dataset stays loaded, not recording, and the UI disables teleop and recording. The parts panel's Reload sends `reload_environment`: the session stops the control and an open episode, then asks the environment on `rpc/environment/reload` to connect its devices again in place. If that fails, the environment stays loaded and failed, so Reload can be tried again. The first connect works the same way: entering an `Environment` joins the bus and starts answering reloads before it tries to connect, so an environment whose devices fail to connect is still loaded, failed, and can be reloaded. Loading an environment with the same spec reuses the store and the dataset carries on; another spec gets a new store, and the dataset is finished and loaded again on it when it fits. Unloading the environment stops the control and disconnects it; the store and the dataset stay until an environment with another spec needs a new store, or the session closes. The parts report for themselves, and the session has one bus listener per part (`Bus.listen`) that decides what a failure means: a failed environment stops the control and recording, a failed control holds the follower, a failed dataset is unloaded. The dataset is a `Recording`, entered with `async with` like the `Environment`: it joins the bus, runs the dataset worker and reports `dataset`, including the worker dying. A control is a thread without a bus of its own, so the session reports it. The socket forwards `evt/status/**`; the UI keeps the last status per component and drops a part's device statuses when the part starts or stops. A robot process that is killed reports nothing yet (shortcut). The session survives.
      - `runtime_session/registry.py`: live sessions and their robots. Forms get `device_in_use` naming the session: the robot observations socket, the camera preview socket for a pinned camera, and `DELETE /robots/{id}` (423).
      - `/api/projects/{id}/runtime/ws?hz=20` implements the protocol above. `load_environment` takes an `EnvironmentDraft` (robots, teleoperator, cameras by id) rather than an `environment_id`, because the form preview loads unsaved environments. The message models are in the OpenAPI schema through the GET stub.
      - `/api/runtime/sessions/ws` pushes the session list (`RuntimeSessionsMessage`) on connect and whenever a session opens, closes, loads or unloads. There is no polling. `POST /api/runtime/sessions/{id}/stop` closes a session, and its socket gets `session_closed` and closes.
@@ -394,7 +412,7 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`, one call per new fra
        - `MoveControl` interpolates from the measured state to a target by joint name over `duration_s`, then holds. Joints left out stay put.
      - Configs are pydantic (`TeleopControlConfig`, `MoveControlConfig`, the `ControlConfig` union) and show up in `state.control`.
      - `set_control {control: ... | null}`: the session stops and joins the old control, re-seeds `action` from the measured state (hold), then starts the new one. `null` is hold. Unloading the environment stops the control first.
-     - A control that dies (an unplugged leader, say) sends `control_failed`, and the session falls back to hold. The environment stays loaded.
+     - A control that dies (an unplugged leader, say) reports `control` failed, and the session falls back to hold. The environment stays loaded.
      - UI: a Teleoperate switch in the environment preview's robot cell, shown when the environment has a leader.
      - The session and sessions websockets run their tasks in an anyio task group. With `asyncio.TaskGroup`, Starlette's anyio cancellation on close sometimes escaped the handler.
      - Session lifecycle:
@@ -419,7 +437,7 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`, one call per new fra
        - `async with session:` hosts the bus and serves the session's own commands: `load_environment`, `unload_environment`, `set_control`, `load_dataset {dataset_id}` and `unload_dataset`. It publishes its state and errors on `evt/session`.
        - Session commands map their failures to error codes themselves (`_command_error`), and the code travels in the bus's error reply.
        - The session subscribes to `evt/dataset` before starting the worker and folds what it publishes into `state.dataset` (`{dataset_id, name, fps, is_recording, episodes_recorded}`), so the worker is the single source of truth.
-       - Unloading the environment unloads the control, then the dataset, then the environment. A dead dataset worker sends `worker_failed` and unloads the dataset; what it saved but had not copied back is lost.
+       - Unloading the environment unloads the control, then the environment; the dataset stays, not recording, with the store. Closing the session unloads the control, the dataset, the environment and then the store. A dataset worker that reports `dataset` failed is unloaded; what it saved but had not copied back is lost.
      - Commands are routed by name: a client command `foo` is a request on `rpc/foo` (`command_key`), served by whichever part handles it. The socket (`api/runtime_ws.py`) only forwards.
        - It reads each command's `command` and `request_id`, puts the raw JSON on the bus, and acks with the reply. It forwards `evt/session`, and samples the store for observations.
        - It knows nothing about what any command does; the handler validates the payload against the command models.
@@ -440,7 +458,24 @@ JPEG encoding runs off the event loop (`asyncio.to_thread`, one call per new fra
      - Leaving the page finishes the recording first: the back link sends `unload_dataset`, which copies the episodes into the dataset, waits for the ack, then refreshes the episodes and navigates. The episode total adds the session's `episodes_recorded` to what the dataset holds, because saved episodes reach the dataset only on that copy.
      - `RUNTIME_WIP` is off "Start recording" and "Add Episode"; it stays on the inference page until Phase 8.
    - Known gap: closing the tab or navigating away another way still saves the recording (the session's teardown copies it back), but the dataset page can then load before the copy finishes and briefly show the old episode count.
+   - 7b-2 done: the session workspace's side bar (see "Session workspace").
+     - `SessionWorkspace` (`features/runtime-session/workspace/`) puts `SessionViewer` (the dock) next to a side bar: the session's state (the parts panel, headed "State"), a mode dropdown and the selected mode's panel. Switching mode holds the follower first. The record page uses it with one mode, record.
+     - `PartsPanel` shows the environment and dataset with their status, and a menu with reload, swap (a picker of the project's environments or datasets) and unload. Reloading a dataset loads it again, which finishes the recording (copies it back) and reopens it.
+     - `usePartCommand` turns an `incompatible_parts` refusal into a confirmation dialog that lists what would be unloaded and why. Confirming sends the load again with `unload_incompatible`.
+     - `RecordMode` is the record panel: the Teleoperate switch (taken off the dock's robot cell, which keeps it in the environment preview), the task (a text area), and start / accept / discard with the hotkeys and the timer. The task box takes the loaded dataset's default task, which follows a swap. The page header's episode total and back link follow the loaded dataset too.
+     - Backend:
+       - `load_environment` swaps a loaded environment instead of refusing. The new environment is described before anything is unloaded, so a refusal changes nothing.
+       - A loaded dataset that no longer fits raises `IncompatiblePartsError` (`incompatible_parts`, with `parts` in the error) unless `unload_incompatible` is set. One that still fits is loaded again on the new environment.
+       - A new dataset with episodes recorded this session counts as having the current environment's shape.
+       - `load_dataset` swaps by finishing the loaded one first.
+       - An error's `data` crosses the bus and is spread into the ack's error, so the socket still knows nothing about it.
+       - `state.environment.environment_id` names the saved environment.
+     - Not done: a reconnect reloads what the page opened with, not what was swapped in since.
+   - 7c (after 7b-2): replay.
+     - First check that the dataset worker can read an episode's actions back while recording.
+     - Then `rpc/episode_actions` on the worker, `ReplayControl` with a grace move to the first frame, and replay mode with an episode dropdown or index field.
 8. **ModelControl:** port the policy execution off `physicalai.runtime` (sync, async with the time-based chunk queue, smoothing). Introduce `ModelControlConfig` and switch `services/runtime_export.py` over to it, along with the export round-trip test. The **inference page** comes back on the new provider, and the `RUNTIME_WIP` flag is deleted. Measure with the oracle model: `actions[i] = f(t0 + i)`.
+   - The inference page comes back as the session workspace's inference mode, with the model in the parts panel.
 9. **Finish:**
    - Check that no `physicalai.runtime` import is left outside `services/runtime_export.py`.
    - Rewrite `docs/explanation/runtime-session-architecture.md`.

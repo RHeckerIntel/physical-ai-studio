@@ -13,6 +13,7 @@ See the "Store design" section of docs/feature_plans/runtime-inhousing-plan.md.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from pathlib import Path
@@ -22,7 +23,7 @@ import numpy as np
 from loguru import logger
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Mapping
 
     from numpy.typing import ArrayLike
 
@@ -155,7 +156,9 @@ class Store:
     def create(cls, spec: FeatureSpec, session_id: str) -> Store:
         """Allocate the block for a session, with every feature unwritten."""
         _vectors, _images, size = _layout(spec)
-        block = shared_memory.SharedMemory(name=f"{BLOCK_PREFIX}{session_id}", create=True, size=size)
+        # The creator's pid in the name lets a sweep tell a dead backend's block from a live one's.
+        name = f"{BLOCK_PREFIX}{os.getpid()}-{session_id}"
+        block = shared_memory.SharedMemory(name=name, create=True, size=size)
         store = cls(spec, block)
         store._stamps[:] = math.nan
         return store
@@ -219,17 +222,32 @@ class Store:
         self._block.unlink()
 
 
-def sweep_stale_blocks(live: Collection[str] = ()) -> list[str]:
-    """Delete session blocks left behind by a session that was killed.
+def sweep_stale_blocks() -> list[str]:
+    """Delete session blocks whose creating process is gone, as a killed backend leaves them.
 
-    Call at backend startup, when no session is live. Returns the names removed.
+    Blocks of a live process are left alone, so a backend starting (or a test run) never
+    removes another backend's sessions. Returns the names removed.
     """
-    # shortcut: assumes one backend per host; a second backend's live blocks would be removed too.
     removed = []
     for path in _SHM_DIR.glob(f"{BLOCK_PREFIX}*") if _SHM_DIR.is_dir() else ():
-        if path.name not in live:
+        if not _owner_alive(path.name):
             path.unlink(missing_ok=True)
             removed.append(path.name)
     if removed:
         logger.warning("Removed {} stale runtime session block(s): {}", len(removed), ", ".join(removed))
     return removed
+
+
+def _owner_alive(name: str) -> bool:
+    """Whether the process named in ``pai-<pid>-<session>`` still runs. A name without one is stale."""
+    pid = name.removeprefix(BLOCK_PREFIX).partition("-")[0]
+    if not pid.isdigit():
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # another user's process: alive, and not ours to judge
+    # shortcut: a reused pid keeps a stale block until that process exits too; harmless, it is only memory.
+    return True

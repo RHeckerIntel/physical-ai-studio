@@ -3,7 +3,8 @@
 The socket only forwards. Every JSON command goes onto the session's bus as a
 request on ``rpc/<command>``; whichever part serves it (the session, or a
 worker such as the dataset worker) answers, and the answer becomes the ack.
-What the session publishes on ``evt/session`` (state, errors) goes back out,
+What the session publishes on ``evt/session`` (state, errors) and every
+part's status on ``evt/status/**`` go back out,
 and the store is sampled at ``hz`` into one binary observation per tick. See
 ``schemas/runtime_session.py`` for the messages.
 """
@@ -29,7 +30,7 @@ from api.dependencies import (
     RuntimeSessionRegistryDep,
 )
 from runtime_session import session as runtime_session
-from runtime_session.bus import Bus, BusRequestError, NoResponderError, Subscription, command_key
+from runtime_session.bus import STATUSES, Bus, BusRequestError, NoResponderError, Subscription, command_key
 from runtime_session.resolve import project_resolvers
 from runtime_session.session import RuntimeSession
 from runtime_session.store import ACTION, STATE, Sample
@@ -42,6 +43,7 @@ from schemas.runtime_session import (
     SessionError,
     SessionEvent,
     StateMessage,
+    StatusMessage,
 )
 from workers.rate import Rate
 
@@ -105,12 +107,16 @@ async def runtime_session_websocket(  # noqa: PLR0913, D103 - FastAPI dependenci
     )
     async with session:
         try:
-            with session.bus.subscribe(runtime_session.EVENTS, SessionEvent) as events:
+            with (
+                session.bus.subscribe(runtime_session.EVENTS, SessionEvent) as events,
+                session.bus.subscribe(STATUSES, StatusMessage) as statuses,
+            ):
                 await websocket.send_json(StateMessage(data=session.state()).model_dump(mode="json"))
                 # anyio, not asyncio.TaskGroup: Starlette cancels through anyio scopes, which asyncio's group can leak.
                 async with anyio.create_task_group() as tasks:
                     tasks.start_soon(_forward_commands, websocket, session.bus)
                     tasks.start_soon(_forward_events, websocket, events)
+                    tasks.start_soon(_forward_events, websocket, statuses)
                     tasks.start_soon(_sample_store, websocket, session, hz)
         except* (WebSocketDisconnect, _SessionEnded):
             pass
@@ -142,7 +148,12 @@ async def _request(bus: Bus, raw: str) -> AckMessage:
             command_key(header.command), raw, dict[str, Any], timeout=_COMMAND_TIMEOUT_S
         )
     except BusRequestError as error:
-        return failed(error.message, error.error_code)
+        # The handler's details (``parts`` for ``incompatible_parts``, say) go to the client as they are.
+        return AckMessage(
+            request_id=header.request_id,
+            ok=False,
+            error=SessionError(message=error.message, error_code=error.error_code, **error.data),
+        )
     except NoResponderError:
         # Nothing serves it now: an unknown command, or one for a part that is not loaded (a dataset, say).
         return failed(f"Nothing can {header.command} right now; load what it needs first.", "command_unavailable")

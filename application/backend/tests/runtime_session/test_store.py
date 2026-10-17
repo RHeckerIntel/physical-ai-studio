@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import uuid
+from multiprocessing import shared_memory
 
 import numpy as np
 import pytest
 
 from runtime_session.store import (
     ACTION,
+    BLOCK_PREFIX,
     STATE,
     FeatureSpec,
     FeatureSpecMismatchError,
@@ -129,14 +132,19 @@ def test_mismatches_name_each_difference() -> None:
     ]
 
 
-def test_sweep_removes_blocks_of_dead_sessions_only(store: Store) -> None:
-    stale = Store.create(SPEC, f"test-{uuid.uuid4().hex}")
-    stale.close()  # its session died without unlinking
+def test_sweep_removes_only_blocks_whose_creator_is_gone(store: Store) -> None:
+    gone = mp.get_context("spawn").Process(target=int)
+    gone.start()
+    gone.join()
+    # A block a dead backend left, and one from before blocks carried their creator's pid.
+    orphans = [f"{BLOCK_PREFIX}{gone.pid}-{uuid.uuid4().hex}", f"{BLOCK_PREFIX}{uuid.uuid4().hex}"]
+    for name in orphans:
+        shared_memory.SharedMemory(name=name, create=True, size=8, track=False).close()
 
-    removed = sweep_stale_blocks(live={store.name})
+    removed = sweep_stale_blocks()
 
-    assert stale.name in removed
+    assert set(orphans) <= set(removed)
+    # This process's block is live: another backend starting (or a test run) must leave it alone.
     assert store.name not in removed
-    with pytest.raises(FileNotFoundError):
-        Store.attach(SPEC, stale.name)
+    assert store.name.startswith(f"{BLOCK_PREFIX}{os.getpid()}-")
     Store.attach(SPEC, store.name).close()

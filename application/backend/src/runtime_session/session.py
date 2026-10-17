@@ -9,9 +9,13 @@ control, see ``command_key``) and publishes its state and errors on
 
 Its optional parts are loaded and unloaded independently, each in its own
 :class:`Slot`: the environment (see ``runtime_session/environment.py``), the
-control driving the follower, and the dataset being recorded. The session adds
-what is about the session itself: its claims on the devices and watching the
-workers.
+control driving the follower, and the dataset being recorded (see
+``runtime_session/dataset.py``), plus the store they share. The session adds
+what is about the session itself: its claims on the devices, and deciding what
+a part's failure means for the others. The parts report their status on
+``evt/status/<part>`` themselves, and the session listens (see ``_listen``);
+it reports a control's for it, as a control is a thread without a bus of its
+own. The socket forwards all of them.
 
 See the "RuntimeSession API" section of docs/feature_plans/runtime-inhousing-plan.md.
 """
@@ -23,41 +27,46 @@ import datetime
 import time
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 from uuid import uuid4
 
 import anyio
 from loguru import logger
 
 from exceptions import BaseException as AppBaseException
-from exceptions import RuntimeSessionCommandError
-from runtime_session.bus import Bus, NoResponderError, Subscription, command_key
+from exceptions import IncompatiblePartsError, RuntimeSessionCommandError
+from runtime_session.bus import EVENTS, Bus, BusRequestError, command_key, publish_status, status_key
 from runtime_session.controls import build_control
-from runtime_session.dataset import dataset_fps, dataset_spec
-from runtime_session.environment import connect_environment, describe_environment
+from runtime_session.dataset import COMPONENT as DATASET
+from runtime_session.dataset import Recording, dataset_spec
+from runtime_session.environment import COMPONENT as ENVIRONMENT
+from runtime_session.environment import RELOAD, Environment, describe_environment
 from runtime_session.slot import Slot
-from runtime_session.store import ACTION, STATE, FeatureSpecMismatchError
+from runtime_session.store import ACTION, STATE, FeatureSpecMismatchError, Store
 from schemas.runtime_session import (
     CommandDone,
+    DiscardEpisodeCommand,
     ErrorMessage,
     LoadDatasetCommand,
     LoadEnvironmentCommand,
+    ReloadEnvironment,
+    ReloadEnvironmentCommand,
     RuntimeSessionInfo,
-    SessionDataset,
     SessionEnvironment,
     SessionState,
     SetControlCommand,
     StateMessage,
+    StatusMessage,
     UnloadDatasetCommand,
     UnloadEnvironmentCommand,
 )
 from services.camera_claims import CameraClaim, settings_from_camera
 from workers import dataset_worker as dataset_rpc
 from workers.base import WorkerStartupError
-from workers.dataset_worker import DatasetWorker, RecordingStatus
+from workers.dataset_worker import RecordingStatus
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from uuid import UUID
 
     from physicalai.robot import Robot
@@ -65,22 +74,20 @@ if TYPE_CHECKING:
 
     from robots.robot_client_factory import RobotClientFactory
     from runtime_session.controls import Control
-    from runtime_session.environment import ConnectedEnvironment, EnvironmentDescription
+    from runtime_session.environment import EnvironmentDescription
     from runtime_session.registry import RuntimeSessionRegistry
-    from runtime_session.store import Store
+    from runtime_session.store import FeatureSpec, Mismatch
     from schemas.dataset import Dataset
     from schemas.environment import EnvironmentWithRelations
     from schemas.runtime_session import ControlConfig, EnvironmentDraft
     from services.camera_claims import CameraClaimRegistry
+    from workers.base import ThreadWorker
 
-_WATCH_INTERVAL_S = 0.25
+_RELOAD_S = 120.0
+"""A backstop: each device has its own ready timeout."""
 
-EVENTS = "evt/session"
-"""Where the session publishes its state and errors (``SessionEvent``)."""
-
-
-_DATASET_READY_S = 10.0
-"""How long a started dataset worker has to answer on the bus."""
+_CONTROL = "control"
+"""What the session reports a control as: a control is a thread in the session, not on the bus itself."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,27 +100,10 @@ class Resolvers:
 
 @dataclass(frozen=True, slots=True)
 class LoadedEnvironment:
-    connected: ConnectedEnvironment
+    environment: Environment
     state: SessionEnvironment
     robot_type: str
     """The follower's type, which a new dataset records."""
-
-
-@dataclass(slots=True)
-class LoadedDataset:
-    dataset: Dataset
-    fps: int
-    status: RecordingStatus
-    """What the worker last published on ``evt/dataset``; the worker owns it."""
-
-    def state(self) -> SessionDataset:
-        return SessionDataset(
-            dataset_id=self.dataset.id,
-            name=self.dataset.name,
-            fps=self.fps,
-            is_recording=self.status.is_recording,
-            episodes_recorded=self.status.episodes_recorded,
-        )
 
 
 class RuntimeSession:
@@ -140,15 +130,18 @@ class RuntimeSession:
         self._environment: Slot[LoadedEnvironment] = Slot("environment")
         self._control: Slot[Control] = Slot("control")
         """Uses the environment's store and leader, so it is unloaded before the environment."""
-        self._dataset: Slot[LoadedDataset] = Slot("dataset")
-        """Records the environment's store, so it is unloaded before the environment."""
+        self._dataset: Slot[Recording] = Slot("dataset")
+        """Records the store, so it is unloaded before the store is replaced."""
+        self._store: Store | None = None
+        """Joints and frames, for the environment's devices and the dataset. Outlives a reloaded
+        environment while the spec stays the same, so the dataset recording from it stays loaded."""
         self._bus: Bus | None = None
-        """Hosted for the session's lifetime; its worker processes join it."""
-        self._background: set[asyncio.Task[None]] = set()
+        """Hosted for the session's lifetime; its parts join it."""
 
     async def __aenter__(self) -> Self:
         self._bus = Bus.host(self.id)
         self._serve_commands(self._bus)
+        self._listen(self._bus)
         self._registry.add(self)
         return self
 
@@ -166,7 +159,11 @@ class RuntimeSession:
         self.closed.set()
         with anyio.CancelScope(shield=True):
             try:
-                await self.unload_environment()
+                async with self._lock:
+                    await self._control.unload()
+                    await self._dataset.unload()
+                    await self._environment.unload()
+                    self._drop_store()
             finally:
                 self._registry.remove(self)
                 if notify:
@@ -185,8 +182,12 @@ class RuntimeSession:
     def _serve_commands(self, bus: Bus) -> None:
         """Serve the commands that change what the session holds; workers serve their own."""
         commands: dict[str, tuple[type[BaseModel], Callable[[Any], Awaitable[None]]]] = {
-            "load_environment": (LoadEnvironmentCommand, lambda command: self._load_draft(command.environment)),
+            "load_environment": (
+                LoadEnvironmentCommand,
+                lambda command: self._load_draft(command.environment, unload_incompatible=command.unload_incompatible),
+            ),
             "unload_environment": (UnloadEnvironmentCommand, lambda _command: self.unload_environment()),
+            "reload_environment": (ReloadEnvironmentCommand, lambda _command: self.reload_environment()),
             "set_control": (SetControlCommand, lambda command: self.set_control(command.control)),
             "load_dataset": (LoadDatasetCommand, lambda command: self._load_dataset_by_id(command.dataset_id)),
             "unload_dataset": (UnloadDatasetCommand, lambda _command: self.unload_dataset()),
@@ -194,8 +195,15 @@ class RuntimeSession:
         for name, (model, run) in commands.items():
             bus.serve(command_key(name), model, _as_command(run))
 
-    async def _load_draft(self, draft: EnvironmentDraft) -> None:
-        await self.load_environment(await self._resolve.environment(draft))
+    def _listen(self, bus: Bus) -> None:
+        """Deal with what the parts report about themselves on the bus."""
+        bus.listen(status_key(ENVIRONMENT), StatusMessage, self._on_environment)
+        bus.listen(status_key(_CONTROL), StatusMessage, self._on_control)
+        bus.listen(status_key(DATASET), StatusMessage, self._on_dataset)
+        bus.listen(dataset_rpc.EVENTS, RecordingStatus, self._on_recording)
+
+    async def _load_draft(self, draft: EnvironmentDraft, *, unload_incompatible: bool) -> None:
+        await self.load_environment(await self._resolve.environment(draft), unload_incompatible=unload_incompatible)
 
     async def _load_dataset_by_id(self, dataset_id: UUID) -> None:
         await self.load_dataset(await self._resolve.dataset(dataset_id))
@@ -221,14 +229,13 @@ class RuntimeSession:
 
     @property
     def store(self) -> Store | None:
-        loaded = self._environment.value
-        return loaded.connected.store if loaded is not None else None
+        return self._store
 
     @property
     def leader(self) -> Robot | None:
         """The environment's leader, connected, for controls to borrow."""
         loaded = self._environment.value
-        return loaded.connected.leader if loaded is not None else None
+        return loaded.environment.leader if loaded is not None else None
 
     def state(self) -> SessionState:
         control, dataset = self._control.value, self._dataset.value
@@ -253,37 +260,95 @@ class RuntimeSession:
             camera_ids=[camera.camera_id for camera in environment.cameras] if environment else [],
         )
 
-    async def load_environment(self, environment: EnvironmentWithRelations) -> None:
-        """Connect the environment's robot, leader and cameras, or fail with nothing held.
+    async def load_environment(
+        self, environment: EnvironmentWithRelations, *, unload_incompatible: bool = False
+    ) -> None:
+        """Connect the environment's robot, leader and cameras, replacing a loaded one.
+
+        An environment with the same spec reuses the store, and the dataset stays loaded. With
+        another spec the store is replaced, and a loaded dataset is loaded again on it when it
+        still fits. If a device fails to connect, the environment is loaded anyway, failed: its
+        status says why, and it can be reloaded.
 
         Raises:
-            RuntimeSessionCommandError: The session is closed, or an environment is already loaded.
+            RuntimeSessionCommandError: The session is closed.
+            IncompatiblePartsError: A loaded dataset does not fit the new environment and
+                ``unload_incompatible`` is not set; nothing changed.
             DeviceInUseError: Another session holds one of its robots.
             CameraSettingsConflictError: Another session uses a camera at other settings.
-            WorkerStartupError: A device failed to connect.
         """
         async with self._lock:
             if self.closed.is_set():
                 raise RuntimeSessionCommandError("The session is closed.", error_code="session_closed")
-            await self._environment.load(self._loaded_environment(environment))
-            logger.info("Session {} loaded environment {!r}", self.id, environment.name)
-        self._emit(StateMessage(data=self.state()))
+            # Described before anything is unloaded: building drivers touches no device, and a
+            # refusal must leave the session as it was.
+            description = await describe_environment(environment, self._robot_factory)
+            reuse_store = self._store is not None and self._store.spec == description.spec
+            dataset = self._dataset.value
+            # A new store needs the dataset loaded again on it.
+            keep = dataset.dataset if dataset is not None and not reuse_store else None
+            if keep is not None and (mismatches := self._dataset_mismatches(keep, dataset, description.spec)):
+                if not unload_incompatible:
+                    reasons = [str(mismatch) for mismatch in mismatches]
+                    raise IncompatiblePartsError([{"part": "dataset", "name": keep.name, "reasons": reasons}])
+                keep = None
+            await self._control.unload()
+            await self._environment.unload()
+            if not reuse_store:
+                await self._dataset.unload()
+                self._drop_store()  # first: the new one takes the same name
+                self._store = Store.create(description.spec, self.id)
+            try:
+                await self._environment.load(self._loaded_environment(environment, description))
+                logger.info("Session {} loaded environment {!r}", self.id, environment.name)
+            finally:
+                # Also when the load was refused: the dataset records from the store, which is there either way.
+                if keep is not None:
+                    await self._reload_dataset(keep, environment.robots[0].robot.type)
+                self._emit(StateMessage(data=self.state()))
+
+    def _drop_store(self) -> None:
+        """Hold the lock, with nothing loaded that uses the store."""
+        if self._store is not None:
+            self._store.unlink()
+            self._store = None
+
+    def _dataset_mismatches(self, dataset: Dataset, loaded: Recording | None, spec: FeatureSpec) -> list[Mismatch]:
+        """What ``spec`` lacks that the dataset needs, counting what this session recorded but has not copied back."""
+        recorded = dataset_spec(dataset)
+        if recorded is None and loaded is not None and loaded.status.episodes_recorded and self.store is not None:
+            # A new dataset gets its shape from the episodes this session recorded into it.
+            recorded = self.store.spec
+        return spec.check_compatible(recorded) if recorded is not None else []
+
+    async def _reload_dataset(self, dataset: Dataset, robot_type: str) -> None:
+        """Hold the lock. Load ``dataset`` again on a new store; a failure is reported, not raised."""
+        try:
+            await self._dataset.load(self._recording(dataset, robot_type))
+        except Exception as error:
+            logger.opt(exception=error).error("Session {} could not load dataset {!r} again", self.id, dataset.name)
+            self._emit(
+                ErrorMessage(
+                    component="dataset",
+                    message=f"Dataset {dataset.name!r} could not be loaded again: {error}",
+                    error_code="dataset_reload_failed",
+                    session_alive=True,
+                )
+            )
 
     @asynccontextmanager
-    async def _loaded_environment(self, environment: EnvironmentWithRelations) -> AsyncIterator[LoadedEnvironment]:
-        """Claim, connect and watch the environment for as long as it is loaded."""
-        description = await describe_environment(environment, self._robot_factory)
+    async def _loaded_environment(
+        self, environment: EnvironmentWithRelations, description: EnvironmentDescription
+    ) -> AsyncIterator[LoadedEnvironment]:
+        """Claim and connect the environment for as long as it is loaded."""
+        store = cast("Store", self._store)  # created before the environment is loaded
         with self._claim(description):
-            async with connect_environment(description, self.id) as connected:
-                watch = asyncio.create_task(self._watch(connected))
-                try:
-                    yield LoadedEnvironment(
-                        connected=connected,
-                        state=description.session_environment(),
-                        robot_type=environment.robots[0].robot.type,
-                    )
-                finally:
-                    watch.cancel()
+            async with Environment(description, self.id, store) as held:
+                yield LoadedEnvironment(
+                    environment=held,
+                    state=description.session_environment(),
+                    robot_type=environment.robots[0].robot.type,
+                )
 
     @contextmanager
     def _claim(self, description: EnvironmentDescription) -> Iterator[None]:
@@ -327,27 +392,54 @@ class RuntimeSession:
         async with self._lock:
             loaded = self._environment.require("Load an environment first.")
             try:
-                await self._switch_control(loaded.connected, config)
+                await self._switch_control(loaded.environment, config)
             finally:
                 self._emit(StateMessage(data=self.state()))
 
-    async def _switch_control(self, connected: ConnectedEnvironment, config: ControlConfig | None) -> None:
+    async def _switch_control(self, environment: Environment, config: ControlConfig | None) -> None:
         """Hold the lock. One control at a time, by construction: the old one is joined before the next starts."""
         await self._control.unload()
         # Hold: the follower stays where it is now, not where the old control last pointed it.
-        if (state := connected.store.read(STATE)) is not None:
-            connected.store.write(ACTION, state.value, timestamp=time.monotonic())
+        if (state := environment.store.read(STATE)) is not None:
+            environment.store.write(ACTION, state.value, timestamp=time.monotonic())
         if config is not None:
-            await self._control.load(build_control(config, connected.store, connected.leader))
+            await self._control.load(self._watched_control(config, environment))
             logger.info("Session {} switched to {} control", self.id, config.type)
 
+    @asynccontextmanager
+    async def _watched_control(self, config: ControlConfig, environment: Environment) -> AsyncIterator[Control]:
+        control = build_control(config, environment.store, environment.leader)
+        async with self._reported(_CONTROL, control):
+            yield control
+
+    async def reload_environment(self) -> None:
+        """Ask the environment to connect its devices again; the store and the dataset stay.
+
+        Raises:
+            RuntimeSessionCommandError: No environment is loaded, or a device failed to connect;
+                the environment stays loaded then, failed, to try again.
+        """
+        async with self._lock:
+            self._environment.require("Load an environment first.")
+            # The control borrows the leader, and the episode records the devices being replaced.
+            await self._control.unload()
+            await self._stop_recording()
+            try:
+                await self.bus.request(RELOAD, ReloadEnvironment(), CommandDone, timeout=_RELOAD_S)
+            except BusRequestError as error:
+                raise RuntimeSessionCommandError(error.message, error_code=error.error_code) from error
+            finally:
+                self._emit(StateMessage(data=self.state()))
+
     async def unload_environment(self) -> None:
-        """Disconnect the environment. A no-op when none is loaded."""
+        """Stop the control and disconnect the environment. A no-op when none is loaded.
+
+        The store and the dataset stay, until an environment with another spec needs a new store.
+        """
         async with self._lock:
             if (environment := self.environment) is None:
                 return
             await self._control.unload()
-            await self._dataset.unload()
             await self._environment.unload()
             logger.info("Session {} unloaded environment {!r}", self.id, environment.name)
         self._emit(StateMessage(data=self.state()))
@@ -356,60 +448,21 @@ class RuntimeSession:
         """Start recording into ``dataset`` from the environment's store.
 
         Raises:
-            RuntimeSessionCommandError: No environment is loaded, or a dataset already is.
+            RuntimeSessionCommandError: No environment is loaded.
             FeatureSpecMismatchError: The dataset was recorded with joints or cameras this environment lacks.
             WorkerStartupError: The dataset could not be opened for recording.
         """
         async with self._lock:
             environment = self._environment.require("Load an environment first.")
-            await self._dataset.load(self._loaded_dataset(dataset, environment))
+            # Swapping: the loaded one is finished (copied back) first.
+            await self._dataset.unload()
+            await self._dataset.load(self._recording(dataset, environment.robot_type))
             logger.info("Session {} records into dataset {!r}", self.id, dataset.name)
         self._emit(StateMessage(data=self.state()))
 
-    @asynccontextmanager
-    async def _loaded_dataset(self, dataset: Dataset, environment: LoadedEnvironment) -> AsyncIterator[LoadedDataset]:
-        store = environment.connected.store
-        if (recorded := dataset_spec(dataset)) is not None:
-            store.spec.require_compatible(recorded)
-        fps = dataset_fps(dataset)
-        worker = DatasetWorker(
-            dataset,
-            session_id=self.id,
-            store_name=store.name,
-            spec=store.spec,
-            fps=fps,
-            robot_type=environment.robot_type,
-        )
-        # Subscribed before the worker starts, so no status it publishes is missed.
-        with self.bus.subscribe(dataset_rpc.EVENTS, RecordingStatus) as statuses:
-            async with worker:
-                loaded = LoadedDataset(dataset=dataset, fps=fps, status=await self._until_serving())
-                tasks = [
-                    asyncio.create_task(self._fold_statuses(loaded, statuses)),
-                    asyncio.create_task(self._watch_dataset(worker)),
-                ]
-                try:
-                    yield loaded
-                finally:
-                    for task in tasks:
-                        task.cancel()
-
-    async def _until_serving(self) -> RecordingStatus:
-        """The worker's first status: its queryables take a moment to reach this process's bus."""
-        deadline = time.monotonic() + _DATASET_READY_S
-        while True:
-            try:
-                return await self.bus.request(dataset_rpc.STATUS, dataset_rpc.Empty(), RecordingStatus, timeout=1.0)
-            except (NoResponderError, TimeoutError):
-                if time.monotonic() > deadline:
-                    raise
-                await asyncio.sleep(0.05)
-
-    async def _fold_statuses(self, loaded: LoadedDataset, statuses: Subscription[RecordingStatus]) -> None:
-        """The worker owns its recording state; show whatever it last announced."""
-        while True:
-            loaded.status = await statuses.next()
-            self._emit(StateMessage(data=self.state()))
+    def _recording(self, dataset: Dataset, robot_type: str) -> Recording:
+        # The store is there with any environment, even one that failed to connect.
+        return Recording(dataset, self.id, cast("Store", self._store), robot_type)
 
     async def unload_dataset(self) -> None:
         """Stop recording and copy what was recorded back into the dataset. A no-op when none is loaded."""
@@ -417,66 +470,69 @@ class RuntimeSession:
             await self._dataset.unload()
         self._emit(StateMessage(data=self.state()))
 
-    async def _watch_dataset(self, worker: DatasetWorker) -> None:
-        """Unload the dataset if its worker dies; what it saved but did not copy back is lost."""
-        await worker.wait_stopped()
-        logger.error("Session {}: dataset worker stopped: {}", self.id, worker.failure)
-        self._emit(
-            ErrorMessage(
-                component=worker.name,
-                message=worker.failure or "The dataset worker stopped",
-                error_code="worker_failed",
-                session_alive=True,
+    async def _stop_recording(self) -> None:
+        """Hold the lock. Discard the episode being recorded: its last frames came from failing devices."""
+        dataset = self._dataset.value
+        if dataset is None or not dataset.status.is_recording:
+            return
+        try:
+            await self.bus.request(
+                command_key("discard_episode"), DiscardEpisodeCommand(request_id=""), RecordingStatus, timeout=5.0
             )
-        )
-        self._run_in_background(self.unload_dataset())
+        except Exception:  # the dataset worker reports its own failure
+            logger.exception("Session {} could not discard the open episode", self.id)
 
-    async def _watch(self, connected: ConnectedEnvironment) -> None:
-        """Unload the environment when one of its workers dies, and hold when the control dies.
+    @asynccontextmanager
+    async def _reported(self, component: str, worker: ThreadWorker[Any]) -> AsyncIterator[None]:
+        """Run a control, reporting its status for it, as the other parts report their own."""
+        publish_status(self.bus, component, "starting")
+        try:
+            await worker.__aenter__()
+        except Exception as error:
+            publish_status(self.bus, component, "failed", str(error))
+            raise
+        publish_status(self.bus, component, "running")
+        watch = asyncio.create_task(self._report_death(component, worker))
+        try:
+            yield
+        finally:
+            watch.cancel()
+            await worker.__aexit__(None, None, None)
+            if not worker.failure:
+                publish_status(self.bus, component, "stopped")
 
-        The session itself survives either.
-        """
-        reported: Control | None = None
-        while True:
-            await asyncio.sleep(_WATCH_INTERVAL_S)
-            if (control := self._control.value) is not None and control is not reported and not control.is_alive():
-                reported = control
-                logger.error("Session {}: control {} stopped: {}", self.id, control.name, control.failure)
-                self._emit(
-                    ErrorMessage(
-                        component=control.name,
-                        message=control.failure or f"{control.name} stopped",
-                        error_code="control_failed",
-                        session_alive=True,
-                    )
-                )
-                self._run_in_background(self._hold_after(control))
-            for worker in connected.workers:
-                if not worker.is_alive():
-                    logger.error("Session {}: worker {} stopped: {}", self.id, worker.name, worker.failure)
-                    self._emit(
-                        ErrorMessage(
-                            component=worker.name,
-                            message=worker.failure or f"{worker.name} stopped",
-                            error_code="worker_failed",
-                            session_alive=True,
-                        )
-                    )
-                    self._run_in_background(self.unload_environment())
-                    return
+    async def _report_death(self, component: str, worker: ThreadWorker[Any]) -> None:
+        await worker.wait_stopped()
+        publish_status(self.bus, component, "failed", worker.failure or "stopped unexpectedly")
 
-    async def _hold_after(self, control: Control) -> None:
-        async with self._lock:
-            loaded = self._environment.value
-            if loaded is None or self._control.value is not control:
-                return  # switched or unloaded meanwhile
-            await self._switch_control(loaded.connected, None)
-        self._emit(StateMessage(data=self.state()))
+    # What the session does when its parts report; each part says why on the bus itself.
 
-    def _run_in_background(self, coroutine: Coroutine[Any, Any, None]) -> None:
-        task = asyncio.create_task(coroutine)
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
+    async def _on_environment(self, status: StatusMessage) -> None:
+        """A failed environment stays loaded, to be reloaded; nothing drives or records it meanwhile."""
+        if status.state == "failed":
+            async with self._lock:
+                await self._control.unload()
+                await self._stop_recording()
+            self._emit(StateMessage(data=self.state()))
+
+    async def _on_control(self, status: StatusMessage) -> None:
+        """A failed control is dropped, and the follower holds; the environment stays loaded."""
+        if status.state == "failed":
+            async with self._lock:
+                if (loaded := self._environment.value) is not None and self._control.value is not None:
+                    await self._switch_control(loaded.environment, None)
+            self._emit(StateMessage(data=self.state()))
+
+    async def _on_dataset(self, status: StatusMessage) -> None:
+        """A failed dataset is unloaded."""
+        if status.state == "failed":
+            await self.unload_dataset()
+
+    def _on_recording(self, status: RecordingStatus) -> None:
+        """The dataset worker owns its recording state; show whatever it last announced."""
+        if (recording := self._dataset.value) is not None:
+            recording.status = status
+            self._emit(StateMessage(data=self.state()))
 
     def _emit(self, event: StateMessage | ErrorMessage) -> None:
         if self._bus is not None:

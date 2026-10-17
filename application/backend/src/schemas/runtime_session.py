@@ -21,6 +21,8 @@ from schemas.environment import CameraEnvironmentConfiguration, RobotEnvironment
 class EnvironmentDraft(BaseModel):
     """An environment to load, saved or still being edited in the form."""
 
+    id: UUID | None = None
+    """The saved environment this is, if it is one; the session reports it back."""
     name: str = "Unsaved environment"
     robots: list[RobotEnvironmentConfiguration]
     cameras: list[CameraEnvironmentConfiguration] = Field(default_factory=list)
@@ -55,11 +57,27 @@ class LoadEnvironmentCommand(BaseModel):
     command: Literal["load_environment"] = "load_environment"
     request_id: str
     environment: EnvironmentDraft
+    unload_incompatible: bool = False
+    """Replace a loaded environment even if a loaded part no longer fits it; that part is unloaded.
+
+    Without it such a load fails with ``incompatible_parts`` and changes nothing.
+    """
 
 
 class UnloadEnvironmentCommand(BaseModel):
     command: Literal["unload_environment"] = "unload_environment"
     request_id: str
+
+
+class ReloadEnvironmentCommand(BaseModel):
+    """Connect the loaded environment's devices again, after one failed; the store and dataset stay."""
+
+    command: Literal["reload_environment"] = "reload_environment"
+    request_id: str
+
+
+class ReloadEnvironment(BaseModel):
+    """What the session asks the environment, on ``rpc/environment/reload``."""
 
 
 class LoadDatasetCommand(BaseModel):
@@ -104,6 +122,7 @@ class SetControlCommand(BaseModel):
 RuntimeSessionCommand = Annotated[
     LoadEnvironmentCommand
     | UnloadEnvironmentCommand
+    | ReloadEnvironmentCommand
     | SetControlCommand
     | LoadDatasetCommand
     | UnloadDatasetCommand
@@ -114,9 +133,17 @@ RuntimeSessionCommand = Annotated[
 ]
 
 
+class IncompatiblePart(BaseModel):
+    part: Literal["dataset", "model"]
+    name: str
+    reasons: list[str]
+
+
 class SessionError(BaseModel):
     message: str
     error_code: str
+    parts: list[IncompatiblePart] | None = None
+    """With ``incompatible_parts``: what the command would unload, and why."""
 
 
 class AckMessage(BaseModel):
@@ -137,6 +164,8 @@ class SessionCamera(BaseModel):
 
 
 class SessionEnvironment(BaseModel):
+    environment_id: UUID | None
+    """The saved environment, or ``None`` for an unsaved one from the form."""
     name: str
     robot_id: UUID
     leader_id: UUID | None
@@ -175,6 +204,26 @@ class ErrorMessage(BaseModel):
     """False when the session has ended; the socket closes after this message."""
 
 
+ComponentState = Literal["starting", "running", "failed", "stopped"]
+
+
+class StatusMessage(BaseModel):
+    """A part of the session or one of its devices saying how it is, on ``evt/status/<component>``.
+
+    ``component`` is a path: ``environment``, ``control`` and ``dataset`` are the
+    session's parts, ``environment/follower``, ``environment/leader`` and
+    ``environment/<camera key>`` the environment's devices. Devices report only
+    ``starting``, ``running`` and ``failed``: a part that starts or stops takes its
+    devices with it, so their earlier statuses no longer apply.
+    """
+
+    type: Literal["status"] = "status"
+    component: str
+    state: ComponentState
+    error: str | None = None
+    """Why it failed."""
+
+
 SessionEvent = Annotated[StateMessage | ErrorMessage, Field(discriminator="type")]
 """What the session publishes on ``evt/session`` for its socket to forward."""
 
@@ -201,7 +250,7 @@ class ObservationMessage(BaseModel):
 
 
 RuntimeSessionServerMessage = Annotated[
-    AckMessage | StateMessage | ErrorMessage | ObservationMessage,
+    AckMessage | StateMessage | ErrorMessage | StatusMessage | ObservationMessage,
     Field(discriminator="type"),
 ]
 

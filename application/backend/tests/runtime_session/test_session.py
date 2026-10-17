@@ -7,9 +7,8 @@ import pytest
 
 from exceptions import DeviceInUseError, RuntimeSessionCommandError
 from runtime_session.store import ACTION, STATE
-from workers.base import WorkerStartupError
 
-from .fixtures import FOLLOWER_ID, LEADER_ID, make_environment, subscribe_events
+from .fixtures import FOLLOWER_ID, LEADER_ID, make_environment, next_status, subscribe_events, subscribe_statuses
 
 
 async def _until(condition, within: float = 5.0) -> None:
@@ -46,9 +45,11 @@ async def test_unloading_releases_everything(new_session, registry, camera_claim
     environment = make_environment()
     await session.load_environment(environment)
     leader = session.leader
+    store = session.store
     await session.unload_environment()
 
-    assert session.environment is None and session.store is None
+    assert session.environment is None
+    assert session.store is store  # kept, until an environment with another spec needs a new one
     assert leader is not None and not leader.is_connected()
     assert registry.holder_of_robot(FOLLOWER_ID) is None
     assert camera_claims.holder_of(environment.cameras[0].fingerprint) is None
@@ -58,14 +59,15 @@ async def test_unloading_releases_everything(new_session, registry, camera_claim
     assert registry.get(session.id) is None
 
 
-async def test_one_environment_at_a_time(new_session, fake_cameras) -> None:
+async def test_loading_another_environment_replaces_the_first(new_session, fake_cameras) -> None:
     session = await new_session()
-    await session.load_environment(make_environment())
-    try:
-        with pytest.raises(RuntimeSessionCommandError):
-            await session.load_environment(make_environment())
-    finally:
-        await session.stop()
+    await session.load_environment(make_environment(cameras=1))
+    first_store = session.store
+    await session.load_environment(make_environment(cameras=0))
+    environment = session.environment
+    assert environment is not None and environment.cameras == []
+    assert session.store is not first_store
+    await session.stop()
 
 
 async def test_another_session_cannot_take_the_robot(new_session, fake_cameras) -> None:
@@ -81,37 +83,75 @@ async def test_another_session_cannot_take_the_robot(new_session, fake_cameras) 
     await second.stop()
 
 
-async def test_a_failed_connect_leaves_nothing_held(new_session, registry, robot_factory, tmp_path) -> None:
+async def test_a_failed_connect_loads_the_environment_failed_to_reload(
+    new_session, registry, robot_factory, tmp_path
+) -> None:
     from tests.workers.fake_robot import FakeRobot
 
+    failing = {FOLLOWER_ID}
+
     async def build(robot, _port_finder):
-        failing = robot.id == FOLLOWER_ID
-        return FakeRobot(str(tmp_path / f"{robot.id}"), ["shoulder_pan"], [0.0], fail_connect=failing), object()
+        connect = robot.id in failing
+        return FakeRobot(str(tmp_path / f"{robot.id}"), ["shoulder_pan"], [0.0], fail_connect=connect), object()
 
     robot_factory.build_robot_driver.side_effect = build
     session = await new_session()
-    with pytest.raises(WorkerStartupError, match="Failed to open serial port"):
-        await session.load_environment(make_environment(cameras=0))
-    assert session.environment is None
-    assert registry.holder_of_robot(LEADER_ID) is None
+    statuses = subscribe_statuses(session)
+    await session.load_environment(make_environment(cameras=0))
+    for component in ("environment/follower", "environment"):
+        status = await next_status(statuses, component, within=1)
+        assert status.state == "failed" and "Failed to open serial port" in status.error
+    # Loaded, with nothing connected: the leader's device is free again.
+    assert session.environment is not None and session.leader is None
     await session.stop()
 
 
-async def test_a_dead_worker_unloads_the_environment_but_not_the_session(new_session, fake_cameras) -> None:
+async def test_a_dead_worker_fails_the_environment_until_it_is_loaded_again(
+    new_session, registry, fake_cameras
+) -> None:
     session = await new_session()
-    events = subscribe_events(session)
-    await session.load_environment(make_environment())
+    events, statuses = subscribe_events(session), subscribe_statuses(session)
+    environment = make_environment()
+    await session.load_environment(environment)
     await asyncio.wait_for(events.next(), 1)  # the loaded state
     fake_cameras.return_value.read_latest.side_effect = RuntimeError("camera unplugged")
 
-    error = await asyncio.wait_for(events.next(), 5)
-    assert error.type == "error"
-    assert error.error_code == "worker_failed"
-    assert error.session_alive
-    assert "camera unplugged" in error.message
+    camera = await next_status(statuses, "environment/cam 0")
+    assert camera.state == "failed" and "camera unplugged" in camera.error
+    failed = await next_status(statuses, "environment")
+    assert failed.state == "failed" and failed.error.startswith("cam 0: ")
     state = await asyncio.wait_for(events.next(), 15)
-    assert state.type == "state" and state.data.environment is None
+    assert state.type == "state" and state.data.environment is not None
+    # Still loaded, holding its devices, until it is loaded again.
+    assert registry.holder_of_robot(FOLLOWER_ID) is session
+    store = session.store
     assert not session.closed.is_set()
+
+    fake_cameras.return_value.read_latest.side_effect = None
+    await session.load_environment(environment)
+    assert session.environment is not None and session.store is store
+    await session.stop()
+
+
+async def test_reloading_a_failed_environment_retries_in_place(new_session, fake_cameras) -> None:
+    session = await new_session()
+    statuses = subscribe_statuses(session)
+    await session.load_environment(make_environment())
+    store = session.store
+    fake_cameras.return_value.read_latest.side_effect = RuntimeError("camera unplugged")
+    assert (await next_status(statuses, "environment")).state == "failed"
+
+    fake_cameras.return_value.connect.side_effect = RuntimeError("no camera")
+    with pytest.raises(RuntimeSessionCommandError, match="no camera") as failed:
+        await session.reload_environment()
+    assert failed.value.error_code == "device_connection_failed"
+    assert session.environment is not None and session.leader is None  # still loaded, to try again
+
+    fake_cameras.return_value.connect.side_effect = None
+    fake_cameras.return_value.read_latest.side_effect = None
+    await session.reload_environment()
+    assert session.store is store
+    assert session.leader is not None and session.leader.is_connected()
     await session.stop()
 
 
@@ -179,7 +219,7 @@ async def test_a_failing_control_reports_and_falls_back_to_hold(new_session) -> 
     from schemas.runtime_session import TeleopControlConfig
 
     session = await new_session()
-    events = subscribe_events(session)
+    statuses = subscribe_statuses(session)
     await session.load_environment(make_environment(cameras=0))
     try:
 
@@ -188,10 +228,8 @@ async def test_a_failing_control_reports_and_falls_back_to_hold(new_session) -> 
 
         session.leader.get_observation = unplugged
         await session.set_control(TeleopControlConfig())
-        while (event := await asyncio.wait_for(events.next(), 5)).type != "error":
-            pass
-        assert event.error_code == "control_failed"
-        assert "leader unplugged" in event.message
+        status = await next_status(statuses, "control", within=5)
+        assert status.state == "failed" and "leader unplugged" in status.error
         await _until(lambda: session.state().control is None)
         assert session.environment is not None  # the environment stays loaded
     finally:

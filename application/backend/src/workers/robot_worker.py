@@ -14,7 +14,7 @@ Any exception ends the worker. Nothing retries silently.
 from __future__ import annotations
 
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -22,6 +22,7 @@ from loguru import logger
 
 from exceptions import RobotDeviceAlreadyOwnedError
 from robots.features import feature_names
+from runtime_session.bus import Bus, publish_status
 from runtime_session.store import ACTION, STATE, FeatureSpec, Store
 from workers.base import ProcessWorker
 from workers.rate import Rate
@@ -105,14 +106,26 @@ class RobotWorker(ProcessWorker["Robot"]):
     """
 
     def __init__(
-        self, recipe: RobotRecipe, store_name: str, spec: FeatureSpec, *, hz: float, observe_only: bool = False
+        self,
+        recipe: RobotRecipe,
+        store_name: str,
+        spec: FeatureSpec,
+        *,
+        hz: float,
+        observe_only: bool = False,
+        session_id: str | None = None,
+        component: str | None = None,
     ) -> None:
+        """Pass ``session_id`` and ``component`` to report a failure on that session's bus."""
         super().__init__(name=f"RobotWorker-{recipe.robot_id}")
         self.recipe = recipe
         self.store_name = store_name
         self.spec = spec
         self.hz = hz
         self.observe_only = observe_only
+        self.session_id = session_id
+        self.component = component
+        self._bus: Bus | None = None
 
     @asynccontextmanager
     async def lifecycle(self) -> AsyncIterator[Robot]:
@@ -120,16 +133,17 @@ class RobotWorker(ProcessWorker["Robot"]):
 
         self._store = Store.attach(self.spec, self.store_name)
         try:
-            driver = cast("Robot", instantiate(self.recipe.driver))
-            driver.connect()
-            try:
-                self._check_joint_order(driver)
-                if not self.observe_only:
-                    observation = driver.get_observation()
-                    self._store.write(ACTION, observation.joint_positions, timestamp=observation.timestamp)
-                yield driver
-            finally:
-                driver.disconnect()
+            with Bus.join(self.session_id) if self.session_id else nullcontext() as self._bus:
+                driver = cast("Robot", instantiate(self.recipe.driver))
+                driver.connect()
+                try:
+                    self._check_joint_order(driver)
+                    if not self.observe_only:
+                        observation = driver.get_observation()
+                        self._store.write(ACTION, observation.joint_positions, timestamp=observation.timestamp)
+                    yield driver
+                finally:
+                    driver.disconnect()
         finally:
             self._store.close()
 
@@ -140,6 +154,14 @@ class RobotWorker(ProcessWorker["Robot"]):
             raise RuntimeError(f"Robot reports joints {connected}, the session expects {self.spec.joint_names}")
 
     async def run_loop(self, context: Robot) -> None:
+        try:
+            await self._drive(context)
+        except Exception as error:
+            if self._bus is not None and self.component is not None:
+                publish_status(self._bus, self.component, "failed", str(error))
+            raise
+
+    async def _drive(self, context: Robot) -> None:
         rate = Rate(self.hz, name=self.name)
         min_goal_time = 1.0 / self.hz
         previous_tick: float | None = None

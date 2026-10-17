@@ -1,10 +1,11 @@
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 import cv2
 from loguru import logger
 from physicalai.capture import SharedCamera
 
+from runtime_session.bus import Bus, publish_status
 from runtime_session.store import ImageSpec, Store
 from schemas.project_camera import Camera
 from utils.camera_factory import build_shared_camera
@@ -24,9 +25,22 @@ class CameraWorker(ThreadWorker[SharedCamera]):
     A thread: ``SharedCamera`` already runs the capture in a publisher process.
     """
 
-    def __init__(self, config: Camera, store: Store, key: str, is_locked: bool = False) -> None:
+    def __init__(
+        self,
+        config: Camera,
+        store: Store,
+        key: str,
+        is_locked: bool = False,
+        *,
+        session_id: str | None = None,
+        component: str | None = None,
+    ) -> None:
+        """Pass ``session_id`` and ``component`` to report a failure on that session's bus."""
         super().__init__(name=f"CameraWorker-{config.name}")
         self.config = config
+        self.session_id = session_id
+        self.component = component
+        self._bus: Bus | None = None
         self.store = store
         self.key = key
         self.is_locked = is_locked
@@ -41,13 +55,22 @@ class CameraWorker(ThreadWorker[SharedCamera]):
         )
         camera.connect()
         try:
-            yield camera
+            with Bus.join(self.session_id) if self.session_id else nullcontext() as self._bus:
+                yield camera
         finally:
             logger.info("Camera run loop stopped. Disconnecting")
             if camera.is_connected:
                 camera.disconnect()
 
     async def run_loop(self, context: SharedCamera) -> None:
+        try:
+            await self._capture(context)
+        except Exception as error:
+            if self._bus is not None and self.component is not None:
+                publish_status(self._bus, self.component, "failed", str(error))
+            raise
+
+    async def _capture(self, context: SharedCamera) -> None:
         rate = Rate(self.config.payload.fps, name=self.name)
         size = (self._image.width, self._image.height)
         while not self.should_stop():

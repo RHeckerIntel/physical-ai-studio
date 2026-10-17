@@ -279,6 +279,18 @@ class RuntimeSessionCommandError(BaseException):
         super().__init__(message=message, error_code=error_code, http_status=http.HTTPStatus.CONFLICT)
 
 
+class IncompatiblePartsError(RuntimeSessionCommandError):
+    """Raised when a load would leave loaded parts unable to work, and was not asked to unload them.
+
+    ``data["parts"]`` lists each part (``part``, ``name``, ``reasons``) for the client to confirm unloading.
+    """
+
+    def __init__(self, parts: list[dict[str, object]]) -> None:
+        names = ", ".join(f"{part['part']} {part['name']!r}" for part in parts)
+        super().__init__(f"This would unload {names}, which no longer fits.", error_code="incompatible_parts")
+        self.data = {"parts": parts}
+
+
 class RobotDeviceAlreadyOwnedError(BaseException):
     """Raised when a SharedRobot device is already locked under another session name."""
 

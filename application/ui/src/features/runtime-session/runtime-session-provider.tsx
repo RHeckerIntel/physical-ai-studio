@@ -10,6 +10,7 @@ import {
     useSyncExternalStore,
 } from 'react';
 
+import { toast } from '@geti-ui/ui';
 import useWebSocket from 'react-use-websocket';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -23,21 +24,29 @@ import {
     SchemaLoadDatasetCommand,
     SchemaLoadEnvironmentCommand,
     SchemaObservationMessage,
+    SchemaReloadEnvironmentCommand,
     SchemaSaveEpisodeCommand,
     SchemaSessionState,
     SchemaSetControlCommand,
     SchemaStartEpisodeCommand,
     SchemaStateMessage,
+    SchemaStatusMessage,
     SchemaUnloadDatasetCommand,
     SchemaUnloadEnvironmentCommand,
 } from '../../api/openapi-spec';
 import { FrameSource } from '../cameras/camera-view';
 import { JointsState } from '../robots/use-robot-observations';
 
-type JsonServerMessage = SchemaAckMessage | SchemaStateMessage | SchemaErrorMessage;
+/** Session errors go away by themselves; the parts panel keeps showing what is still failed. */
+export const ERROR_TOAST = { timeout: 10_000 };
+
+type JsonServerMessage = SchemaAckMessage | SchemaStateMessage | SchemaErrorMessage | SchemaStatusMessage;
+/** The last status of each part and device, by component: ``environment``, ``environment/cam 0``, ``control``. */
+export type Statuses = Record<string, SchemaStatusMessage>;
 type Command =
     | Omit<SchemaLoadEnvironmentCommand, 'request_id'>
     | Omit<SchemaUnloadEnvironmentCommand, 'request_id'>
+    | Omit<SchemaReloadEnvironmentCommand, 'request_id'>
     | Omit<SchemaSetControlCommand, 'request_id'>
     | Omit<SchemaLoadDatasetCommand, 'request_id'>
     | Omit<SchemaUnloadDatasetCommand, 'request_id'>
@@ -45,8 +54,9 @@ type Command =
     | Omit<SchemaSaveEpisodeCommand, 'request_id'>
     | Omit<SchemaDiscardEpisodeCommand, 'request_id'>;
 
-/** The draft a session loads, from a saved environment. */
+/** The draft a session loads, from a saved environment; its id lets the session load it again (Reload). */
 export const environmentDraft = (environment: SchemaEnvironmentWithRelations): SchemaEnvironmentDraft => ({
+    id: environment.id,
     name: environment.name,
     robots: (environment.robots ?? []).map(({ robot, tele_operator }) => ({
         robot_id: robot.id,
@@ -55,6 +65,23 @@ export const environmentDraft = (environment: SchemaEnvironmentWithRelations): S
     })),
     cameras: (environment.cameras ?? []).flatMap((camera) => (camera.id ? [{ camera_id: camera.id }] : [])),
 });
+
+/** Why ``component`` failed, while it is failed. */
+export const failureOf = (statuses: Statuses, component: string): string | null => {
+    const status = statuses[component];
+    return status?.state === 'failed' ? (status.error ?? 'Failed') : null;
+};
+
+/** A part that starts or stops takes its devices with it, so their earlier statuses are dropped. */
+const withStatus = (statuses: Statuses, status: SchemaStatusMessage): Statuses => {
+    const kept =
+        status.state === 'starting' || status.state === 'stopped'
+            ? Object.fromEntries(
+                  Object.entries(statuses).filter(([component]) => !component.startsWith(`${status.component}/`))
+              )
+            : statuses;
+    return { ...kept, [status.component]: status };
+};
 
 type Listener<T> = (value: T) => void;
 
@@ -80,6 +107,7 @@ interface RuntimeSessionContextValue {
     state: SchemaSessionState | null;
     /** The last command or worker error, until the next successful load. */
     error: SchemaErrorMessage | null;
+    statuses: Statuses;
     isLoading: boolean;
     observations: Channel<SchemaObservationMessage>;
     frame: (key: string) => Channel<Blob>;
@@ -136,12 +164,14 @@ export const RuntimeSessionProvider = ({
 }) => {
     const [state, setState] = useState<SchemaSessionState | null>(null);
     const [error, setError] = useState<SchemaErrorMessage | null>(null);
+    const [statuses, setStatuses] = useState<Statuses>({});
     const [isLoading, setIsLoading] = useState(false);
     const observations = useRef(new Channel<SchemaObservationMessage>()).current;
     const frames = useRef(new Map<string, Channel<Blob>>()).current;
     const pending = useRef(new Map<string, (ack: SchemaAckMessage) => void>()).current;
     const sessionClosed = useRef(false);
-
+    // The latest state, for the load effect to read without rerunning on every state.
+    const latestState = useRef<SchemaSessionState | null>(null);
     const frame = useCallback(
         (key: string) => {
             let channel = frames.get(key);
@@ -161,7 +191,9 @@ export const RuntimeSessionProvider = ({
         reconnectAttempts: 5,
         reconnectInterval: 3000,
         onClose: () => {
+            latestState.current = null;
             setState(null);
+            setStatuses({});
             pending.forEach((resolve, request_id) =>
                 resolve({
                     type: 'ack',
@@ -183,11 +215,19 @@ export const RuntimeSessionProvider = ({
             const message = JSON.parse(event.data) as JsonServerMessage;
             switch (message.type) {
                 case 'state':
+                    latestState.current = message.data;
                     setState(message.data);
                     break;
                 case 'error':
                     sessionClosed.current = !message.session_alive;
                     setError(message);
+                    break;
+                case 'status':
+                    setStatuses((previous) => withStatus(previous, message));
+                    if (message.component === 'control' && message.state === 'failed') {
+                        // The follower holds; nothing else shows a control.
+                        toast.negative(`Control stopped: ${message.error ?? 'it failed'}`, ERROR_TOAST);
+                    }
                     break;
                 case 'ack':
                     pending.get(message.request_id)?.(message);
@@ -216,13 +256,15 @@ export const RuntimeSessionProvider = ({
         }
         let cancelled = false;
         const draft = JSON.parse(environmentKey) as SchemaEnvironmentDraft | null;
+        // A load that replaces the environment keeps a dataset that still fits, and refuses
+        // otherwise; loading it again would finish and reopen it.
+        const loadDataset = dataset_id !== undefined && latestState.current?.dataset?.dataset_id !== dataset_id;
         const reload = async () => {
             setIsLoading(true);
-            // Unloading the environment unloads the dataset too.
             await send({ command: 'unload_environment' });
             if (draft !== null && draft.robots.length > 0 && !cancelled) {
-                let ack = await send({ command: 'load_environment', environment: draft });
-                if (ack.ok && dataset_id !== undefined && !cancelled) {
+                let ack = await send({ command: 'load_environment', environment: draft, unload_incompatible: false });
+                if (ack.ok && loadDataset && dataset_id !== undefined && !cancelled) {
                     ack = await send({ command: 'load_dataset', dataset_id });
                 }
                 if (!cancelled) {
@@ -240,8 +282,8 @@ export const RuntimeSessionProvider = ({
     }, [environmentKey, dataset_id, hasSession, send]);
 
     const value = useMemo(
-        () => ({ state, error, isLoading, observations, frame, send }),
-        [state, error, isLoading, observations, frame, send]
+        () => ({ state, error, statuses, isLoading, observations, frame, send }),
+        [state, error, statuses, isLoading, observations, frame, send]
     );
 
     return <RuntimeSessionContext.Provider value={value}>{children}</RuntimeSessionContext.Provider>;

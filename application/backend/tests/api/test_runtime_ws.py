@@ -228,7 +228,7 @@ def test_recording_commands_over_the_socket(client: TestClient) -> None:
     )
 
     with (
-        patch("runtime_session.session.DatasetWorker", FakeDatasetWorker),
+        patch("runtime_session.dataset.DatasetWorker", FakeDatasetWorker),
         client.websocket_connect(_url()) as websocket,
     ):
         websocket.receive_json()
@@ -248,4 +248,24 @@ def test_recording_commands_over_the_socket(client: TestClient) -> None:
         failed = socket.ack({"command": "save_episode"})
         assert failed["error"]["error_code"] == "no_episode"
         assert "No episode" in failed["error"]["message"]
-        assert socket.ack({"command": "unload_dataset"})["ok"]
+        # Swapping to an environment the dataset does not fit is refused with what it would unload.
+        Path(ours.path, "meta").mkdir()
+        Path(ours.path, "meta", "info.json").write_text(
+            json.dumps(
+                {
+                    "fps": 30,
+                    "features": {
+                        "observation.state": {"shape": [2], "names": ["shoulder_pan.pos", "gripper.pos"]},
+                        "action": {"shape": [2], "names": ["shoulder_pan.pos", "gripper.pos"]},
+                        "observation.images.cam 0": {"shape": [120, 160, 3]},
+                    },
+                }
+            )
+        )
+        no_cameras = {**_draft(), "cameras": []}
+        refused = socket.ack({"command": "load_environment", "environment": no_cameras})
+        assert refused["error"]["error_code"] == "incompatible_parts"
+        assert refused["error"]["parts"][0]["part"] == "dataset"
+        swapped = socket.ack({"command": "load_environment", "environment": no_cameras, "unload_incompatible": True})
+        assert swapped["ok"]
+        assert socket.until_state(lambda data: data["dataset"] is None)["environment"]["cameras"] == []

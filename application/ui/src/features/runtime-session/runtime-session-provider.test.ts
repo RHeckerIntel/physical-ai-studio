@@ -45,6 +45,7 @@ describe('environmentDraft', () => {
         } as unknown as Parameters<typeof environmentDraft>[0]);
 
         expect(draft).toEqual({
+            id: 'env',
             name: 'Bench',
             robots: [{ robot_id: 'follower', tele_operator: { type: 'robot', robot_id: 'leader' } }],
             cameras: [{ camera_id: 'cam' }],

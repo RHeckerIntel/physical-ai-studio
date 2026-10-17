@@ -11,7 +11,7 @@ import { RobotModelsProvider } from '../../robots/robot-models-context';
 import { AvailableSchemaRobot, isUnavailableRobot } from '../../robots/robot-types';
 import { InlineAlert } from '../../robots/setup-wizard/shared/inline-alert';
 import { useSynchronizeModelJoints } from '../../robots/use-synchronize-model-joints';
-import { useRuntimeSession, useSessionJoints } from '../runtime-session-provider';
+import { ERROR_TOAST, failureOf, useRuntimeSession, useSessionJoints } from '../runtime-session-provider';
 
 /**
  * Teleoperation as the UI starts it. The leader is read at 100 Hz, each reading one command, and on every
@@ -20,8 +20,8 @@ import { useRuntimeSession, useSessionJoints } from '../runtime-session-provider
 export const TELEOP_CONTROL = { type: 'teleop', hz: 100, grace_s: 3 } as const satisfies SchemaTeleopControlConfig;
 
 /** Drive the follower from the leader, or hold it where it is. */
-const TeleopSwitch = () => {
-    const { state, send } = useRuntimeSession();
+export const TeleopSwitch = () => {
+    const { state, statuses, send } = useRuntimeSession();
     const [isPending, setIsPending] = useState(false);
 
     const setTeleop = async (teleoperate: boolean) => {
@@ -32,7 +32,7 @@ const TeleopSwitch = () => {
         });
         setIsPending(false);
         if (!ack.ok) {
-            toast.negative(ack.error?.message ?? 'Could not switch teleoperation.');
+            toast.negative(ack.error?.message ?? 'Could not switch teleoperation.', ERROR_TOAST);
         }
     };
 
@@ -40,7 +40,8 @@ const TeleopSwitch = () => {
         <Switch
             isEmphasized
             isSelected={state?.control?.type === 'teleop'}
-            isDisabled={isPending}
+            // A failed environment stays loaded until it is loaded again, with nothing to drive.
+            isDisabled={isPending || failureOf(statuses, 'environment') !== null}
             onChange={(teleoperate) => void setTeleop(teleoperate)}
         >
             Teleoperate
@@ -55,7 +56,8 @@ const LiveRobot = ({ robot }: { robot: AvailableSchemaRobot }) => {
     return <RobotViewer robot={robot} />;
 };
 
-export const RobotCell = ({ follower_id }: { follower_id: string }) => {
+/** The session's follower. ``showTeleop`` puts the Teleoperate switch on it, for pages without a side bar. */
+export const RobotCell = ({ follower_id, showTeleop = true }: { follower_id: string; showTeleop?: boolean }) => {
     const { project_id } = useProjectId();
     const { state, error, isLoading } = useRuntimeSession();
 
@@ -97,7 +99,7 @@ export const RobotCell = ({ follower_id }: { follower_id: string }) => {
                 position={'relative'}
             >
                 <LiveRobot robot={robot} />
-                {state.environment.leader_id !== null && (
+                {showTeleop && state.environment.leader_id !== null && (
                     <View position={'absolute'} right={0} top={0} padding='size-100'>
                         <TeleopSwitch />
                     </View>
