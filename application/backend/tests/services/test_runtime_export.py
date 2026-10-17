@@ -12,8 +12,8 @@ from robots.robot_client_factory import RobotClientFactory
 from schemas import SerialPortInfo
 from schemas.project_camera import CameraAdapter
 from schemas.robot import RobotAdapter
+from schemas.runtime_session import ExecutionConfig
 from services.runtime_export import (
-    POLICY_REQUEST_THRESHOLD,
     build_runtime_config,
     policy_source_fragment,
     runtime_config_change_me,
@@ -191,12 +191,25 @@ def test_policy_source_fragment_is_independent_of_the_export_dir() -> None:
     assert export["init_args"]["execution"] == other["init_args"]["execution"]
     assert export["init_args"]["action_queue"] == other["init_args"]["action_queue"]
     assert export["init_args"]["execution"]["class_path"] == "physicalai.runtime.SyncExecution"
-    assert export["init_args"]["execution"]["init_args"]["request_threshold"] == POLICY_REQUEST_THRESHOLD
+    assert export["init_args"]["execution"]["init_args"]["request_threshold"] == ExecutionConfig().request_threshold
     assert "duration_frames" not in export["init_args"]["action_queue"]["init_args"]["smoother"]["init_args"]
     assert "policy_name" not in export["init_args"]["model"]["init_args"]
     assert export["init_args"]["model"]["init_args"]["export_dir"] == "./exports/torch"
     assert export["init_args"]["task"] == "pick up the cube"
     assert "task" not in other["init_args"]
+
+
+def test_policy_source_fragment_runs_the_session_s_execution() -> None:
+    export = policy_source_fragment(
+        export_dir="./exports/torch",
+        backend="torch",
+        device="cpu",
+        execution=ExecutionConfig(mode="async", request_threshold=0.25),
+    )
+    assert export["init_args"]["execution"] == {
+        "class_path": "physicalai.runtime.AsyncExecution",
+        "init_args": {"request_threshold": 0.25},
+    }
 
 
 def test_empty_task_is_omitted_from_the_fragment() -> None:

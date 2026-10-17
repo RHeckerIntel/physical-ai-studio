@@ -27,6 +27,7 @@ import datetime
 import time
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self, cast
 from uuid import uuid4
 
@@ -42,6 +43,8 @@ from runtime_session.dataset import COMPONENT as DATASET
 from runtime_session.dataset import Recording, dataset_spec
 from runtime_session.environment import COMPONENT as ENVIRONMENT
 from runtime_session.environment import RELOAD, Environment, describe_environment
+from runtime_session.model import COMPONENT as MODEL
+from runtime_session.model import ProcessModel, model_inputs
 from runtime_session.slot import Slot
 from runtime_session.store import ACTION, STATE, FeatureSpecMismatchError, Store
 from schemas.runtime_session import (
@@ -50,6 +53,8 @@ from schemas.runtime_session import (
     ErrorMessage,
     LoadDatasetCommand,
     LoadEnvironmentCommand,
+    LoadModelCommand,
+    ModelControlConfig,
     ReloadEnvironment,
     ReloadEnvironmentCommand,
     ReplayControlConfig,
@@ -61,6 +66,7 @@ from schemas.runtime_session import (
     StatusMessage,
     UnloadDatasetCommand,
     UnloadEnvironmentCommand,
+    UnloadModelCommand,
 )
 from services.camera_claims import CameraClaim, settings_from_camera
 from workers import dataset_worker as dataset_rpc
@@ -81,6 +87,7 @@ if TYPE_CHECKING:
     from runtime_session.store import FeatureSpec, Mismatch
     from schemas.dataset import Dataset, Episode
     from schemas.environment import EnvironmentWithRelations
+    from schemas.model import Model
     from schemas.runtime_session import ControlConfig, EnvironmentDraft
     from services.camera_claims import CameraClaimRegistry
     from workers.base import ThreadWorker
@@ -98,6 +105,7 @@ class Resolvers:
 
     environment: Callable[[EnvironmentDraft], Awaitable[EnvironmentWithRelations]]
     dataset: Callable[[UUID], Awaitable[Dataset]]
+    model: Callable[[UUID], Awaitable[Model]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +142,8 @@ class RuntimeSession:
         """Uses the environment's store and leader, so it is unloaded before the environment."""
         self._dataset: Slot[Recording] = Slot("dataset")
         """Records the store, so it is unloaded before the store is replaced."""
+        self._model: Slot[ProcessModel] = Slot("model")
+        """Reads the store's frames, so it is unloaded before the store is replaced; a model control borrows it."""
         self._store: Store | None = None
         """Joints and frames, for the environment's devices and the dataset. Outlives a reloaded
         environment while the spec stays the same, so the dataset recording from it stays loaded."""
@@ -163,6 +173,7 @@ class RuntimeSession:
             try:
                 async with self._lock:
                     await self._control.unload()
+                    await self._model.unload()
                     await self._dataset.unload()
                     await self._environment.unload()
                     self._drop_store()
@@ -193,6 +204,8 @@ class RuntimeSession:
             "set_control": (SetControlCommand, lambda command: self.set_control(command.control)),
             "load_dataset": (LoadDatasetCommand, lambda command: self._load_dataset_by_id(command.dataset_id)),
             "unload_dataset": (UnloadDatasetCommand, lambda _command: self.unload_dataset()),
+            "load_model": (LoadModelCommand, self._load_model_command),
+            "unload_model": (UnloadModelCommand, lambda _command: self.unload_model()),
         }
         for name, (model, run) in commands.items():
             bus.serve(command_key(name), model, _as_command(run))
@@ -202,6 +215,7 @@ class RuntimeSession:
         bus.listen(status_key(ENVIRONMENT), StatusMessage, self._on_environment)
         bus.listen(status_key(_CONTROL), StatusMessage, self._on_control)
         bus.listen(status_key(DATASET), StatusMessage, self._on_dataset)
+        bus.listen(status_key(MODEL), StatusMessage, self._on_model)
         bus.listen(dataset_rpc.EVENTS, RecordingStatus, self._on_recording)
 
     async def _load_draft(self, draft: EnvironmentDraft, *, unload_incompatible: bool) -> None:
@@ -209,6 +223,9 @@ class RuntimeSession:
 
     async def _load_dataset_by_id(self, dataset_id: UUID) -> None:
         await self.load_dataset(await self._resolve.dataset(dataset_id))
+
+    async def _load_model_command(self, command: LoadModelCommand) -> None:
+        await self.load_model(await self._resolve.model(command.model_id), command.backend, command.device)
 
     @property
     def label(self) -> str:
@@ -240,12 +257,13 @@ class RuntimeSession:
         return loaded.environment.leader if loaded is not None else None
 
     def state(self) -> SessionState:
-        control, dataset = self._control.value, self._dataset.value
+        control, dataset, model = self._control.value, self._dataset.value, self._model.value
         return SessionState(
             session_id=self.id,
             environment=self.environment,
             control=control.config if control else None,
             dataset=dataset.state() if dataset else None,
+            model=model.state() if model else None,
         )
 
     def info(self) -> RuntimeSessionInfo:
@@ -289,14 +307,22 @@ class RuntimeSession:
             dataset = self._dataset.value
             # A new store needs the dataset loaded again on it.
             keep = dataset.dataset if dataset is not None and not reuse_store else None
+            model = self._model.value
+            # Like the dataset, a model reads the store, so it is loaded again on a new one.
+            keep_model = model if model is not None and not reuse_store else None
+            incompatible: list[dict[str, object]] = []
             if keep is not None and (mismatches := self._dataset_mismatches(keep, dataset, description.spec)):
-                if not unload_incompatible:
-                    reasons = [str(mismatch) for mismatch in mismatches]
-                    raise IncompatiblePartsError([{"part": "dataset", "name": keep.name, "reasons": reasons}])
+                incompatible.append({"part": "dataset", "name": keep.name, "reasons": [str(m) for m in mismatches]})
                 keep = None
+            if keep_model is not None and (reason := _model_mismatch(keep_model, description.spec)):
+                incompatible.append({"part": "model", "name": keep_model.model.name, "reasons": [reason]})
+                keep_model = None
+            if incompatible and not unload_incompatible:
+                raise IncompatiblePartsError(incompatible)
             await self._control.unload()
             await self._environment.unload()
             if not reuse_store:
+                await self._model.unload()
                 await self._dataset.unload()
                 self._drop_store()  # first: the new one takes the same name
                 self._store = Store.create(description.spec, self.id)
@@ -307,6 +333,8 @@ class RuntimeSession:
                 # Also when the load was refused: the dataset records from the store, which is there either way.
                 if keep is not None:
                     await self._reload_dataset(keep, environment.robots[0].robot.type)
+                if keep_model is not None:
+                    await self._reload_model(keep_model)
                 self._emit(StateMessage(data=self.state()))
 
     def _drop_store(self) -> None:
@@ -334,6 +362,21 @@ class RuntimeSession:
                     component="dataset",
                     message=f"Dataset {dataset.name!r} could not be loaded again: {error}",
                     error_code="dataset_reload_failed",
+                    session_alive=True,
+                )
+            )
+
+    async def _reload_model(self, model: ProcessModel) -> None:
+        """Hold the lock. Load ``model`` again on a new store; a failure is reported, not raised."""
+        try:
+            await self._model.load(self._process_model(model.model, model.backend, model.device))
+        except Exception as error:
+            logger.opt(exception=error).error("Session {} could not load model {!r} again", self.id, model.model.name)
+            self._emit(
+                ErrorMessage(
+                    component="model",
+                    message=f"Model {model.model.name!r} could not be loaded again: {error}",
+                    error_code="model_reload_failed",
                     session_alive=True,
                 )
             )
@@ -412,7 +455,7 @@ class RuntimeSession:
     @asynccontextmanager
     async def _watched_control(self, config: ControlConfig, environment: Environment) -> AsyncIterator[Control]:
         episode = await self._episode(config.episode_index) if isinstance(config, ReplayControlConfig) else None
-        control = build_control(config, environment.store, environment.leader, episode)
+        control = build_control(config, environment.store, environment.leader, episode, self._model.value)
         async with self._reported(_CONTROL, control):
             yield control
 
@@ -473,6 +516,40 @@ class RuntimeSession:
         # The store is there with any environment, even one that failed to connect.
         return Recording(dataset, self.id, cast("Store", self._store), robot_type)
 
+    async def load_model(self, model: Model, backend: str, device: str) -> None:
+        """Load one of ``model``'s exports in its own process, replacing a loaded model.
+
+        Raises:
+            RuntimeSessionCommandError: No environment is loaded.
+            ValueError: The model has no such export, or does not fit the environment.
+            WorkerStartupError: The model could not be loaded.
+        """
+        async with self._lock:
+            environment = self._environment.require("Load an environment first.")
+            await self._unload_model(environment.environment)
+            await self._model.load(self._process_model(model, backend, device))
+            logger.info("Session {} loaded model {!r} ({}, {})", self.id, model.name, backend, device)
+        self._emit(StateMessage(data=self.state()))
+
+    def _process_model(self, model: Model, backend: str, device: str) -> ProcessModel:
+        # The store is there with any environment, even one that failed to connect.
+        return ProcessModel(model, self.id, cast("Store", self._store), backend=backend, device=device)
+
+    async def unload_model(self) -> None:
+        """Stop a model control, then the model. A no-op when none is loaded."""
+        async with self._lock:
+            if (loaded := self._environment.value) is not None:
+                await self._unload_model(loaded.environment)
+            else:
+                await self._model.unload()
+        self._emit(StateMessage(data=self.state()))
+
+    async def _unload_model(self, environment: Environment) -> None:
+        """Hold the lock. A control driving the follower with the model holds it first."""
+        if (control := self._control.value) is not None and isinstance(control.config, ModelControlConfig):
+            await self._switch_control(environment, None)
+        await self._model.unload()
+
     async def unload_dataset(self) -> None:
         """Stop recording and copy what was recorded back into the dataset. A no-op when none is loaded."""
         async with self._lock:
@@ -532,6 +609,11 @@ class RuntimeSession:
                     await self._switch_control(loaded.environment, None)
             self._emit(StateMessage(data=self.state()))
 
+    async def _on_model(self, status: StatusMessage) -> None:
+        """A failed model is unloaded, and the follower holds if it was driving it."""
+        if status.state == "failed":
+            await self.unload_model()
+
     async def _on_dataset(self, status: StatusMessage) -> None:
         """A failed dataset is unloaded."""
         if status.state == "failed":
@@ -548,6 +630,15 @@ class RuntimeSession:
             self._bus.publish(EVENTS, event)
         if event.type == "state":
             self._registry.changed()
+
+
+def _model_mismatch(model: ProcessModel, spec: FeatureSpec) -> str | None:
+    """Why the loaded model would not fit a store with ``spec``, or ``None``."""
+    try:
+        model_inputs(Path(model.model.path) / "exports" / model.backend, spec)
+    except ValueError as error:
+        return str(error)
+    return None
 
 
 def _as_command(run: Callable[[Any], Awaitable[None]]) -> Callable[[Any], Awaitable[CommandDone]]:

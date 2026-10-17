@@ -24,6 +24,7 @@ import { MoreMenu } from '@geti-ui/ui/icons';
 
 import { $api } from '../../../api/client';
 import { SchemaEnvironmentDraft, SchemaSessionEnvironment } from '../../../api/openapi-spec';
+import { getDefaultInferenceDevice } from '../../models/backend-selection/backend-selection';
 import { useProject, useProjectId } from '../../projects/use-project';
 import { failureOf, Statuses, useRuntimeSession } from '../runtime-session-provider';
 import { PendingConfirmation, SessionCommand, usePartCommand } from './use-part-command';
@@ -33,7 +34,7 @@ interface Choice {
     name: string;
 }
 
-/** Pick another environment or dataset to load in place of the current one. */
+/** Pick another environment, dataset or model to load in place of the current one. */
 const SwapDialog = ({
     title,
     choices,
@@ -201,27 +202,43 @@ const PartRow = ({
     </Flex>
 );
 
+/** A part the side bar shows besides the environment, which it always shows. */
+export type PanelPart = 'dataset' | 'model';
+
 /**
  * What the session has loaded, with reload, swap and unload.
  *
  * Swapping the environment can change the feature spec; the session then refuses, and the
  * confirmation lists what would be unloaded before the load is sent again.
  */
-export const PartsPanel = () => {
+export const PartsPanel = ({ parts }: { parts: PanelPart[] }) => {
     const { project_id } = useProjectId();
     const project = useProject();
     const { state, statuses } = useRuntimeSession();
     const { run, isPending, confirmation } = usePartCommand();
     const [pendingPart, setPendingPart] = useState<string | null>(null);
-    const [swapping, setSwapping] = useState<'environment' | 'dataset' | null>(null);
+    const [swapping, setSwapping] = useState<'environment' | PanelPart | null>(null);
 
     const { data: environments = [] } = $api.useQuery('get', '/api/projects/{project_id}/environments', {
         params: { path: { project_id } },
     });
     const datasets = project.datasets ?? [];
+    const { data: models = [] } = $api.useQuery(
+        'get',
+        '/api/projects/{project_id}/models',
+        { params: { path: { project_id } } },
+        { enabled: parts.includes('model') }
+    );
+    const { data: inferenceDevices = [] } = $api.useQuery(
+        'get',
+        '/api/system/devices/inference',
+        {},
+        { enabled: parts.includes('model') }
+    );
 
     const environment = state?.environment;
     const dataset = state?.dataset;
+    const model = state?.model;
     const environmentFailure = failureOf(statuses, 'environment');
 
     const draftOf = (environment_id: string): SchemaEnvironmentDraft | undefined => {
@@ -267,14 +284,47 @@ export const PartsPanel = () => {
         }
     };
 
+    /** A swapped-in model runs on the backend and device the loaded one did, if it can; else on its defaults. */
+    const loadModel = (model_id: string) => {
+        const picked = models.find((candidate) => candidate.id === model_id);
+        if (picked === undefined) {
+            return;
+        }
+        const backend =
+            model && picked.available_backends.includes(model.backend)
+                ? model.backend
+                : (picked.available_backends.at(0) ?? 'openvino');
+        const device =
+            model?.backend === backend
+                ? model.device
+                : (getDefaultInferenceDevice(inferenceDevices, backend)?.device ?? 'auto');
+        void runFor('model', { command: 'load_model', model_id, backend, device });
+    };
+
+    const onModel = (action: PartAction) => {
+        if (action === 'swap') {
+            setSwapping('model');
+        } else if (action === 'unload') {
+            void runFor('model', { command: 'unload_model' });
+        } else if (model) {
+            // Loading it again starts its process again.
+            void runFor('model', {
+                command: 'load_model',
+                model_id: model.model_id,
+                backend: model.backend,
+                device: model.device,
+            });
+        }
+    };
+
     const loaded = (isLoaded: boolean): PartAction[] => (isLoaded ? ['reload', 'swap', 'unload'] : ['swap']);
 
-    const datasetActions = (): PartAction[] => {
+    /** A dataset or model is kept without a working environment, but loading one needs it. */
+    const partActions = (isLoaded: boolean): PartAction[] => {
         if (environment == null || environmentFailure !== null) {
-            // Kept without a working environment; loading another needs one.
-            return dataset != null ? ['unload'] : [];
+            return isLoaded ? ['unload'] : [];
         }
-        return loaded(dataset != null);
+        return loaded(isLoaded);
     };
 
     return (
@@ -292,16 +342,32 @@ export const PartsPanel = () => {
                 onAction={onEnvironment}
             />
             {environment != null && <DeviceStatuses statuses={statuses} environment={environment} />}
-            <PartRow
-                label='Dataset'
-                name={dataset?.name}
-                detail={dataset?.episodes_recorded ? `${dataset.episodes_recorded} recorded this session` : undefined}
-                error={failureOf(statuses, 'dataset')}
-                isLoaded={dataset != null}
-                isPending={isPending && pendingPart === 'dataset'}
-                actions={datasetActions()}
-                onAction={onDataset}
-            />
+            {parts.includes('dataset') && (
+                <PartRow
+                    label='Dataset'
+                    name={dataset?.name}
+                    detail={
+                        dataset?.episodes_recorded ? `${dataset.episodes_recorded} recorded this session` : undefined
+                    }
+                    error={failureOf(statuses, 'dataset')}
+                    isLoaded={dataset != null}
+                    isPending={isPending && pendingPart === 'dataset'}
+                    actions={partActions(dataset != null)}
+                    onAction={onDataset}
+                />
+            )}
+            {parts.includes('model') && (
+                <PartRow
+                    label='Model'
+                    name={model?.name}
+                    detail={model ? `${model.backend} · ${model.device}` : undefined}
+                    error={failureOf(statuses, 'model')}
+                    isLoaded={model != null}
+                    isPending={isPending && pendingPart === 'model'}
+                    actions={partActions(model != null)}
+                    onAction={onModel}
+                />
+            )}
 
             <DialogContainer onDismiss={() => setSwapping(null)}>
                 {swapping === 'environment' && (
@@ -323,6 +389,19 @@ export const PartsPanel = () => {
                         )}
                         current={dataset?.dataset_id}
                         onPick={(dataset_id) => void runFor('dataset', { command: 'load_dataset', dataset_id })}
+                        close={() => setSwapping(null)}
+                    />
+                )}
+                {swapping === 'model' && (
+                    <SwapDialog
+                        title='Model'
+                        choices={models.flatMap((choice) =>
+                            choice.id && choice.available_backends.length > 0
+                                ? [{ id: choice.id, name: choice.name }]
+                                : []
+                        )}
+                        current={model?.model_id}
+                        onPick={loadModel}
                         close={() => setSwapping(null)}
                     />
                 )}

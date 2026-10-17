@@ -23,6 +23,7 @@ import {
     SchemaErrorMessage,
     SchemaLoadDatasetCommand,
     SchemaLoadEnvironmentCommand,
+    SchemaLoadModelCommand,
     SchemaObservationMessage,
     SchemaReloadEnvironmentCommand,
     SchemaSaveEpisodeCommand,
@@ -33,6 +34,7 @@ import {
     SchemaStatusMessage,
     SchemaUnloadDatasetCommand,
     SchemaUnloadEnvironmentCommand,
+    SchemaUnloadModelCommand,
 } from '../../api/openapi-spec';
 import { FrameSource } from '../cameras/camera-view';
 import { JointsState } from '../robots/use-robot-observations';
@@ -50,9 +52,14 @@ type Command =
     | Omit<SchemaSetControlCommand, 'request_id'>
     | Omit<SchemaLoadDatasetCommand, 'request_id'>
     | Omit<SchemaUnloadDatasetCommand, 'request_id'>
+    | Omit<SchemaLoadModelCommand, 'request_id'>
+    | Omit<SchemaUnloadModelCommand, 'request_id'>
     | Omit<SchemaStartEpisodeCommand, 'request_id'>
     | Omit<SchemaSaveEpisodeCommand, 'request_id'>
     | Omit<SchemaDiscardEpisodeCommand, 'request_id'>;
+
+/** A model export to load: which model, and the backend and device it runs on. */
+export type SessionModelToLoad = Omit<SchemaLoadModelCommand, 'request_id' | 'command'>;
 
 /** The draft a session loads, from a saved environment; its id lets the session load it again (Reload). */
 export const environmentDraft = (environment: SchemaEnvironmentWithRelations): SchemaEnvironmentDraft => ({
@@ -154,12 +161,15 @@ export const RuntimeSessionProvider = ({
     project_id,
     environment,
     dataset_id,
+    model,
     children,
 }: {
     project_id: string;
     environment: SchemaEnvironmentDraft | null;
     /** Recorded into once the environment is loaded. */
     dataset_id?: string;
+    /** Loaded once the environment is, to run. */
+    model?: SessionModelToLoad;
     children: ReactNode;
 }) => {
     const [state, setState] = useState<SchemaSessionState | null>(null);
@@ -249,6 +259,7 @@ export const RuntimeSessionProvider = ({
 
     // Reload whenever the environment changes, and on every new socket (a new session).
     const environmentKey = JSON.stringify(environment);
+    const modelKey = JSON.stringify(model ?? null);
     const hasSession = state !== null;
     useEffect(() => {
         if (!hasSession) {
@@ -259,6 +270,14 @@ export const RuntimeSessionProvider = ({
         // A load that replaces the environment keeps a dataset that still fits, and refuses
         // otherwise; loading it again would finish and reopen it.
         const loadDataset = dataset_id !== undefined && latestState.current?.dataset?.dataset_id !== dataset_id;
+        // The same goes for a model: loading it again would restart its process.
+        const toLoad = JSON.parse(modelKey) as SessionModelToLoad | null;
+        const loaded = latestState.current?.model;
+        const loadModel =
+            toLoad !== null &&
+            (loaded?.model_id !== toLoad.model_id ||
+                loaded.backend !== toLoad.backend ||
+                loaded.device !== toLoad.device);
         const reload = async () => {
             setIsLoading(true);
             await send({ command: 'unload_environment' });
@@ -266,6 +285,9 @@ export const RuntimeSessionProvider = ({
                 let ack = await send({ command: 'load_environment', environment: draft, unload_incompatible: false });
                 if (ack.ok && loadDataset && dataset_id !== undefined && !cancelled) {
                     ack = await send({ command: 'load_dataset', dataset_id });
+                }
+                if (ack.ok && loadModel && toLoad !== null && !cancelled) {
+                    ack = await send({ command: 'load_model', ...toLoad });
                 }
                 if (!cancelled) {
                     setError(ack.ok ? null : commandError(ack));
@@ -279,7 +301,7 @@ export const RuntimeSessionProvider = ({
         return () => {
             cancelled = true;
         };
-    }, [environmentKey, dataset_id, hasSession, send]);
+    }, [environmentKey, dataset_id, modelKey, hasSession, send]);
 
     const value = useMemo(
         () => ({ state, error, statuses, isLoading, observations, frame, send }),

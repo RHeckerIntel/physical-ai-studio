@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
-from runtime_session.bus import Bus, NoResponderError, publish_status
+from runtime_session.bus import Bus, publish_status, until_serving
 from runtime_session.store import FeatureSpec, ImageSpec
 from schemas.runtime_session import SessionDataset
 from workers import dataset_worker as dataset_rpc
@@ -146,7 +145,9 @@ class Recording:
                 if (recorded := dataset_spec(self.dataset)) is not None:
                     self._store.spec.require_compatible(recorded)
                 await stack.enter_async_context(self._worker)
-                self.status = await _until_serving(bus)
+                self.status = await until_serving(
+                    bus, dataset_rpc.STATUS, dataset_rpc.Empty(), RecordingStatus, within=_READY_S
+                )
             except Exception as error:
                 publish_status(bus, COMPONENT, "failed", str(error))
                 raise
@@ -170,15 +171,3 @@ class Recording:
         # A worker that failed stays reported failed.
         if self._started and self._worker.failure is None:
             publish_status(bus, COMPONENT, "stopped")
-
-
-async def _until_serving(bus: Bus) -> RecordingStatus:
-    """The worker's first status: its queryables take a moment to reach the bus."""
-    deadline = time.monotonic() + _READY_S
-    while True:
-        try:
-            return await bus.request(dataset_rpc.STATUS, dataset_rpc.Empty(), RecordingStatus, timeout=1.0)
-        except (NoResponderError, TimeoutError):
-            if time.monotonic() > deadline:
-                raise
-            await asyncio.sleep(0.05)

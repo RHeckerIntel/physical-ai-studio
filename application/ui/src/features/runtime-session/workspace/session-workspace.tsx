@@ -4,7 +4,7 @@ import { Divider, Flex, Grid, Item, Loading, minmax, Picker, View } from '@geti-
 
 import { useRuntimeSession } from '../runtime-session-provider';
 import { SessionPart, SessionViewer } from '../session-viewer';
-import { PartsPanel } from './parts-panel';
+import { PanelPart, PartsPanel } from './parts-panel';
 
 /**
  * One way of working with the session: the parts it needs, and its side bar panel, which
@@ -23,7 +23,16 @@ export interface WorkspaceMode {
  * the selected mode's panel. Entry points (record, and inference) only choose what is loaded
  * first and which modes there are.
  */
-export const SessionWorkspace = ({ modes, cancelHref }: { modes: WorkspaceMode[]; cancelHref: string }) => {
+export const SessionWorkspace = ({
+    modes,
+    parts = ['dataset'],
+    cancelHref,
+}: {
+    modes: WorkspaceMode[];
+    /** What the parts panel shows besides the environment. */
+    parts?: PanelPart[];
+    cancelHref: string;
+}) => {
     const { send } = useRuntimeSession();
     const [modeKey, setModeKey] = useState(modes[0].key);
     const mode = modes.find((candidate) => candidate.key === modeKey) ?? modes[0];
@@ -49,7 +58,7 @@ export const SessionWorkspace = ({ modes, cancelHref }: { modes: WorkspaceMode[]
             <View backgroundColor='gray-100' padding='size-200' overflow='auto' minHeight={0}>
                 <Flex direction='column' gap='size-200'>
                     <Suspense fallback={<Loading mode='inline' />}>
-                        <PartsPanel />
+                        <PartsPanel parts={parts} />
                     </Suspense>
                     <Divider size='S' />
                     <Picker

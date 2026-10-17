@@ -106,7 +106,7 @@ async def new_session(registry, camera_claims, robot_factory):
                 registry=registry,
                 camera_claims=camera_claims,
                 robot_factory=robot_factory,
-                resolve=Resolvers(environment=_unresolvable, dataset=_unresolvable),
+                resolve=Resolvers(environment=_unresolvable, dataset=_unresolvable, model=_unresolvable),
             )
             return await stack.enter_async_context(session)
 

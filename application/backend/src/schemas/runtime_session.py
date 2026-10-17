@@ -61,7 +61,29 @@ class ReplayControlConfig(BaseModel):
     grace_s: float = Field(3, ge=0, le=30, description="The follower moves to the episode's first frame over this long")
 
 
-ControlConfig = Annotated[TeleopControlConfig | MoveControlConfig | ReplayControlConfig, Field(discriminator="type")]
+class ExecutionConfig(BaseModel):
+    """How a model's action chunks are requested, as ``physicalai.runtime`` runs them."""
+
+    mode: Literal["sync", "async"] = "sync"
+    """``sync`` infers in the control's tick and waits; ``async`` infers alongside, while the queue plays."""
+    request_threshold: float = Field(
+        default=0.5, ge=0, le=1, description="Request the next chunk once this fraction of the current one is left"
+    )
+
+
+class ModelControlConfig(BaseModel):
+    """Drive the follower with the loaded model."""
+
+    type: Literal["model"] = "model"
+    task: str = ""
+    """What the model is asked to do, for a policy that takes a task."""
+    hz: float = Field(30, gt=0, le=500, description="How often an action is taken from the model's queue")
+    execution: ExecutionConfig = ExecutionConfig()
+
+
+ControlConfig = Annotated[
+    TeleopControlConfig | MoveControlConfig | ReplayControlConfig | ModelControlConfig, Field(discriminator="type")
+]
 
 
 class LoadEnvironmentCommand(BaseModel):
@@ -89,6 +111,22 @@ class ReloadEnvironmentCommand(BaseModel):
 
 class ReloadEnvironment(BaseModel):
     """What the session asks the environment, on ``rpc/environment/reload``."""
+
+
+class LoadModelCommand(BaseModel):
+    """Load one of a model's exports to run. Needs an environment whose joints and cameras fit it."""
+
+    command: Literal["load_model"] = "load_model"
+    request_id: str
+    model_id: UUID
+    backend: str
+    """One of the model's ``available_backends``."""
+    device: str = "auto"
+
+
+class UnloadModelCommand(BaseModel):
+    command: Literal["unload_model"] = "unload_model"
+    request_id: str
 
 
 class LoadDatasetCommand(BaseModel):
@@ -137,6 +175,8 @@ RuntimeSessionCommand = Annotated[
     | SetControlCommand
     | LoadDatasetCommand
     | UnloadDatasetCommand
+    | LoadModelCommand
+    | UnloadModelCommand
     | StartEpisodeCommand
     | SaveEpisodeCommand
     | DiscardEpisodeCommand,
@@ -193,12 +233,20 @@ class SessionDataset(BaseModel):
     """Saved in this session and not yet copied into the dataset, which happens when it is unloaded."""
 
 
+class SessionModel(BaseModel):
+    model_id: UUID
+    name: str
+    backend: str
+    device: str
+
+
 class SessionState(BaseModel):
     session_id: str
     environment: SessionEnvironment | None = None
     control: ControlConfig | None = None
     """What drives the follower; ``None`` holds it still."""
     dataset: SessionDataset | None = None
+    model: SessionModel | None = None
 
 
 class StateMessage(BaseModel):

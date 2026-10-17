@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 from api.dependencies import (
     CameraClaimRegistryDep,
     DatasetServiceDep,
+    ModelServiceDep,
     ProjectCameraServiceDep,
     ProjectServiceDep,
     RobotClientFactoryDep,
@@ -90,6 +91,7 @@ async def runtime_session_websocket(  # noqa: PLR0913, D103 - FastAPI dependenci
     robot_service: RobotServiceDep,
     camera_service: ProjectCameraServiceDep,
     dataset_service: DatasetServiceDep,
+    model_service: ModelServiceDep,
     robot_client_factory: RobotClientFactoryDep,
     registry: RuntimeSessionRegistryDep,
     camera_claims: CameraClaimRegistryDep,
@@ -103,7 +105,7 @@ async def runtime_session_websocket(  # noqa: PLR0913, D103 - FastAPI dependenci
         registry=registry,
         camera_claims=camera_claims,
         robot_factory=robot_client_factory,
-        resolve=project_resolvers(project_id, robot_service, camera_service, dataset_service),
+        resolve=project_resolvers(project_id, robot_service, camera_service, dataset_service, model_service),
     )
     async with session:
         try:

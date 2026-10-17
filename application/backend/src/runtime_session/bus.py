@@ -16,6 +16,7 @@ import asyncio
 import inspect
 import json
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
@@ -211,8 +212,18 @@ class Bus:
             NoResponderError: Nothing serves ``key``.
             TimeoutError: The handler did not reply in time.
         """
+        return await asyncio.to_thread(self.request_sync, key, message, response, timeout=timeout)
+
+    def request_sync[R](self, key: str, message: BaseModel | str, response: type[R] | Any, *, timeout: float) -> R:
+        """:meth:`request`, blocking the calling thread; for threads outside the event loop, like a model's executor.
+
+        Raises:
+            BusRequestError: The handler raised; carries its message and error code.
+            NoResponderError: Nothing serves ``key``.
+            TimeoutError: The handler did not reply in time.
+        """
         payload = message if isinstance(message, str) else message.model_dump_json()
-        replies = await asyncio.to_thread(self._get, self._prefix + key, payload, timeout)
+        replies = list(self._session.get(self._prefix + key, payload=payload, timeout=timeout))
         # zenoh reports its own timeout as an error reply without a replier
         answered = [reply for reply in replies if reply.ok is not None or reply.replier_id is not None]
         if not answered:
@@ -227,9 +238,6 @@ class Bus:
             )
         adapter: TypeAdapter[R] = TypeAdapter(response)
         return adapter.validate_json(reply.ok.payload.to_bytes())
-
-    def _get(self, key: str, payload: str, timeout: float) -> list[zenoh.Reply]:
-        return list(self._session.get(key, payload=payload, timeout=timeout))
 
     def serve[M](
         self, key: str, model: type[M] | Any, handler: Callable[[M], BaseModel | Awaitable[BaseModel]]
@@ -278,6 +286,23 @@ class Bus:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+async def until_serving[R](bus: Bus, key: str, message: BaseModel, response: type[R] | Any, *, within: float) -> R:
+    """The first reply on ``key`` from a worker that just started: its queryables take a moment to reach the bus.
+
+    Raises:
+        NoResponderError: Nothing served ``key`` within ``within`` seconds.
+        TimeoutError: Neither did anything reply.
+    """
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            return await bus.request(key, message, response, timeout=1.0)
+        except (NoResponderError, TimeoutError):
+            if time.monotonic() > deadline:
+                raise
+            await asyncio.sleep(0.05)
 
 
 def _error_code(error: Exception) -> str:

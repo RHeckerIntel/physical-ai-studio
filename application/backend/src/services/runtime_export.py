@@ -16,6 +16,7 @@ from physicalai_studio_plugin import shared_robot_name
 
 from robots.features import sanitize_camera_name
 from robots.robot_client_factory import RobotClientFactory
+from schemas.runtime_session import ExecutionConfig
 from utils.camera_factory import build_camera_config, is_migrated
 
 if TYPE_CHECKING:
@@ -25,7 +26,6 @@ if TYPE_CHECKING:
     from schemas.robot import Robot
 
 RUNTIME_FPS = 30.0
-POLICY_REQUEST_THRESHOLD = 0.5
 
 
 class _StoredPortFallback:
@@ -75,20 +75,24 @@ def policy_source_fragment(
     backend: str,
     device: str,
     task: str | None = None,
+    execution: ExecutionConfig | None = None,
 ) -> dict[str, Any]:
     """Return the PolicySource recipe the inference export instantiates.
+
+    ``execution`` is what a session's ``ModelControl`` runs with, so the export runs the same.
 
     Omit ``policy_name`` so the manifest is read. Omit ``duration_frames`` so
     ``LerpSmoother`` keeps its upstream default of 5.
     """
+    execution = execution or ExecutionConfig()
     init_args: dict[str, Any] = {
         "model": Config(
             "physicalai.inference.InferenceModel",
             {"export_dir": export_dir, "backend": backend, "device": device},
         ).to_dict(),
         "execution": Config(
-            "physicalai.runtime.SyncExecution",
-            {"request_threshold": POLICY_REQUEST_THRESHOLD},
+            "physicalai.runtime.AsyncExecution" if execution.mode == "async" else "physicalai.runtime.SyncExecution",
+            {"request_threshold": execution.request_threshold},
         ).to_dict(),
         "action_queue": Config(
             "physicalai.runtime.ChunkedActionQueue",

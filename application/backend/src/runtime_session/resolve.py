@@ -18,13 +18,18 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from schemas.dataset import Dataset
+    from schemas.model import Model
     from schemas.runtime_session import EnvironmentDraft
-    from services import DatasetService, RobotService
+    from services import DatasetService, ModelService, RobotService
     from services.project_camera_service import ProjectCameraService
 
 
 def project_resolvers(
-    project_id: UUID, robots: RobotService, cameras: ProjectCameraService, datasets: DatasetService
+    project_id: UUID,
+    robots: RobotService,
+    cameras: ProjectCameraService,
+    datasets: DatasetService,
+    models: ModelService,
 ) -> Resolvers:
     """Resolvers backed by the database, scoped to ``project_id``."""
 
@@ -50,4 +55,10 @@ def project_resolvers(
             raise ResourceNotFoundError(ResourceType.DATASET, str(dataset_id))
         return found
 
-    return Resolvers(environment=environment, dataset=dataset)
+    async def model(model_id: UUID) -> Model:
+        found = await models.get_model_by_id(model_id)
+        if found.project_id != project_id:
+            raise ResourceNotFoundError(ResourceType.MODEL, str(model_id))
+        return found
+
+    return Resolvers(environment=environment, dataset=dataset, model=model)

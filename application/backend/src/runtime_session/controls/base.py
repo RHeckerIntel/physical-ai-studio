@@ -41,7 +41,10 @@ class Control(ThreadWorker[None]):
     @asynccontextmanager
     async def lifecycle(self) -> AsyncIterator[None]:
         self.on_start()
-        yield
+        try:
+            yield
+        finally:
+            self.on_stop()
 
     async def run_loop(self, context: None) -> None:  # noqa: ARG002
         rate = Rate(self.hz, name=self.name)
@@ -51,6 +54,9 @@ class Control(ThreadWorker[None]):
 
     def on_start(self) -> None:
         """Capture what the control starts from, before its first tick. Does nothing by default."""
+
+    def on_stop(self) -> None:
+        """Release what :meth:`on_start` set up, on the control's thread. Does nothing by default."""
 
     @abstractmethod
     def on_tick(self) -> None:

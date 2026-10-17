@@ -131,7 +131,7 @@ RuntimeSession all ties this together. The RuntimeSession holds the current stor
 What we have today and what we keep from it:
 
 - `src/runtime/` drives everything through `physicalai.runtime.RobotRuntime`: a single loop at one fps, with Studio plugging in an `ActionSource` and some callbacks. It runs in a detached subprocess found over zenoh (`transport/`, `owner.py`, `hosts/`). This is the code we replace.
-- `physicalai.runtime` also gives us the policy execution (`PolicySource`, `ChunkedActionQueue`/`ActionChunk(t0, dt)`, `AsyncExecution`, `LerpSmoother`, RTC). Bringing this in-house is the real work behind `ModelControl`.
+- `physicalai.runtime` also gives us the policy execution (`PolicySource`, `ChunkedActionQueue`, `SyncExecution`/`AsyncExecution`, `LerpSmoother`, RTC). `ModelControl` uses these as they are, with only the model swapped for one in its own process (Phase 8), so Studio runs a policy exactly as an export does.
 - We keep depending on `physicalai.robot`, `physicalai.capture` (`SharedCamera`), `physicalai.inference` (`InferenceModel`) and `physicalai.config`. Studio stops *running* on `physicalai.runtime`.
 - **Runtime config export stays.** The environment and model "export runtime config" endpoints (`api/environments.py`, `api/models.py`) write a YAML that runs on `physicalai.runtime.RobotRuntime` *outside* Studio, which is the deployment path. They only build a Config document and never run it, so they move to `services/runtime_export.py` and keep their `physicalai.runtime` class paths.
   - **Why both exist:** `physicalai.runtime` stays the lean way to run a policy on a robot without Studio. Studio's own runtime has different needs (concurrent rates, swappable controls, recording, HIL), so the two are allowed to diverge internally.
@@ -239,7 +239,9 @@ The joint names come namespaced the way the dataset stores them (e.g. `shoulder_
   - `MoveControl` interpolates from the current state to a target over T and then holds. It is also the right thing to run when switching between controls.
   - `TeleopControl` borrows the environment's leader driver, and each tick reads it and writes `action`. Robot-specific subclasses can drive the leader too (set its position, change torque). Stopping it leaves the leader connected.
   - `ReplayControl` plays a loaded dataset's episode into `action` at the dataset fps, writing each frame's timestamp as `start + frame_index / fps`, then holds the last frame. It needs a loaded dataset and an environment whose spec matches it. The session reads the episode from the dataset on disk, not from the dataset worker.
-  - `ModelControl` borrows the loaded policy, snapshots the store into an observation, runs inference with `t0 = observation timestamp`, and samples a clock-indexed chunk queue at control hz. This is where the time-based `ActionChunk` work is ported over. Order: sync first, then async with a separate inference thread, then smoothing, and RTC last. Open for Phase 8: inference then runs in the API process, so measure whether Python-side preprocessing holding the GIL makes the websocket stutter before settling on that.
+  - `ModelControl` runs `physicalai.runtime`'s `PolicySource` (the executor, `ChunkedActionQueue` and `LerpSmoother`) in the session process, and writes the action itself, like the other controls. Its model is a `ProcessModel`: inference runs in a `ModelWorker` process, because preprocessing and the runtimes' Python side hold the GIL long enough to stall the API's event loop.
+    - `ProcessModel.predict_action_chunk` sends the state and the task over `rpc/model/infer`; the worker adds each camera's latest frame from the store (images never cross the bus) and replies with the whole chunk. The executor handles the chunk as it would a local model's.
+    - With `async` execution the request blocks `AsyncExecution`'s own thread, which waits on the bus with the GIL released.
 - **Switching control:** stop the old control (join), re-seed `action` from the current state, then start the new one. That keeps the one-active-control rule structural instead of arbitrated.
 
 ## RuntimeSession API (asyncio, in the FastAPI process)
@@ -474,10 +476,21 @@ The record and inference pages become one session workspace: the dock (the follo
      - `ReplayControlConfig {episode_index, grace_s}` through `set_control`. The session reads the episode of the loaded dataset from disk (`find_episode`), and `ReplayControl` plays it at the dataset's fps after a grace move to the first frame, then holds the last frame.
      - Replay mode in the workspace: the dataset's episodes with their length, play / stop, and progress timed in the browser.
      - Play is disabled while an episode is being recorded, which would record the replay.
-8. **ModelControl:** port the policy execution off `physicalai.runtime` (sync, async with the time-based chunk queue, smoothing). Introduce `ModelControlConfig` and switch `services/runtime_export.py` over to it, along with the export round-trip test. The **inference page** comes back on the new provider, and the `RUNTIME_WIP` flag is deleted. Measure with the oracle model: `actions[i] = f(t0 + i)`.
-   - The inference page comes back as the session workspace's inference mode, with the model in the parts panel.
+8. **ModelControl:** the model as a session part and `ModelControl` driving the follower with it. The **inference page** comes back on the new provider, and the `RUNTIME_WIP` flag is deleted.
+   - 8a, backend:
+     - `load_model {model_id, backend, device}` loads a `ProcessModel`, which starts a `ModelWorker` and reports `model` on the bus. The export's manifest is checked against the store: the state's size, and each camera it reads. A model reads the store, so like the dataset it is loaded again on a new store, or reported in `incompatible_parts`.
+     - `ModelControlConfig {task, hz, execution: {mode: sync | async, request_threshold}}`. Sync and async take the same parameters (the watchdog timeout is left at its default), so one flat config fits both; RTC would make it a union.
+     - `services/runtime_export.py` builds the export's execution from the same `ExecutionConfig`.
+     - A failed model is unloaded, and a model control holds the follower first.
+     - Tested with an oracle model (`state + 1 .. state + chunk`), sync and async. Smoke-tested with a real ACT OpenVINO export: about 60 ms per chunk, round trip included.
+   - 8b, UI:
+     - "Run model" picks the backend and its device as before (`/api/system/devices/inference` names devices per backend) and opens the workspace on the environment of the dataset the model was trained on, with the model loaded. A model without a dataset starts with no environment.
+     - The parts panel shows the model instead of the dataset, with its backend and device; swapping keeps the backend and device when the new model has that export.
+     - Inference mode: the task (the dataset's default task), the execution mode and request threshold, and play / stop. The control runs at 30 Hz, the rate the runtime export uses.
+     - `RUNTIME_WIP` and `RuntimeWipNotice` are deleted.
+     - Not done: the runtime export still uses the default execution; it can pass the session's once the download dialog takes it.
 9. **Finish:**
-   - Check that no `physicalai.runtime` import is left outside `services/runtime_export.py`.
+   - Check that `physicalai.runtime` is only imported by `services/runtime_export.py` and `ModelControl`.
    - Rewrite `docs/explanation/runtime-session-architecture.md`.
    - Do a full manual pass on real hardware: preview, teleop, record + save/discard, inference, replay.
 10. **Merge** the feature branch into `main`.
@@ -492,4 +505,4 @@ The record and inference pages become one session workspace: the dock (the follo
 6. **UI levels:** a camera form opens a `CameraWorker`, a robot form opens an observe-only `RobotWorker`, and the environment, record and inference pages open a `RuntimeSession`, loading environment only, + dataset, or + model respectively. All live updates come from the session store at ~20 Hz. Pages with a session read joints and frames only from the provider, never from per-device sockets.
 7. **Keep the runtime export.** Studio exports a config that runs on `physicalai.runtime` outside Studio, built from the same `ModelControlConfig` the session runs. Settings without a runtime equivalent are flagged as not exported.
 8. **Remove first, rebuild after.** The old runtime is deleted in Phase 0; unfinished features show as work in progress on the feature branch until their phase lands.
-9. **Controls borrow; the session owns.** The environment connects the leader as a plain driver (no worker) and keeps it connected across control switches; `TeleopControl` and HIL borrow it, `ModelControl` borrows the loaded policy. Borrowing controls run as threads in the session process. The store has no leader slot.
+9. **Controls borrow; the session owns.** The environment connects the leader as a plain driver (no worker) and keeps it connected across control switches; `TeleopControl` and HIL borrow it, `ModelControl` borrows the loaded `ProcessModel`, whose inference runs in its own process. Borrowing controls run as threads in the session process. The store has no leader slot.
