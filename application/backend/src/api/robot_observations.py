@@ -19,9 +19,9 @@ from physicalai.robot import RobotError, SharedRobot
 
 from api.dependencies import RobotClientFactoryDep, get_robot_service
 from exceptions import BaseException as AppBaseException
+from robots.features import observation_to_dict
 from robots.shared_robot_errors import translate_robot_error
-from runtime.contract import ErrorEvent, ObservationEvent
-from runtime.features import observation_to_dict
+from schemas.robot_stream import ErrorEvent, ObservationEvent
 from services import RobotService
 from workers.base import run_at_frequency
 

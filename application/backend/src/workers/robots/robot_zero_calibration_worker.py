@@ -23,8 +23,8 @@ from loguru import logger
 from pydantic import ValidationError
 
 from robots.catalog.registry import RobotCatalogRegistry
+from robots.features import observation_to_dict
 from robots.robot_client_factory import RobotClientFactory
-from runtime.features import observation_to_dict
 from workers.transport.worker_transport import WorkerTransport
 from workers.transport_worker import TransportWorker, WorkerState
 

@@ -4,6 +4,7 @@ import { ActionButton, Button, DialogTrigger, Flex, Item, Key, Menu, MenuTrigger
 import { MoreMenu } from '@geti-ui/ui/icons';
 
 import { SchemaModel, SchemaTrainJob } from '../../../api/openapi-spec';
+import { RUNTIME_WIP } from '../../../components/runtime-wip/runtime-wip';
 import { Table } from '../../../components/table/table';
 import { useDatasetQuery, useEnvironmentQuery } from '../api/queries';
 import { durationBetween } from '../shared/duration';
@@ -77,7 +78,9 @@ export const ModelRow = ({
             <Text UNSAFE_className={duration ? undefined : classes.rowInfo}>{duration ?? '—'}</Text>
             <div onClick={(e) => e.stopPropagation()}>
                 <DialogTrigger>
-                    <Button variant='secondary'>Run model</Button>
+                    <Button variant='secondary' isDisabled={RUNTIME_WIP}>
+                        Run model
+                    </Button>
                     {(close) => <StartInferenceDialog close={close} model={model} />}
                 </DialogTrigger>
             </div>

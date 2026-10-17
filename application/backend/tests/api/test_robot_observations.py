@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import numpy as np
@@ -12,7 +12,7 @@ from physicalai.robot import RobotDeviceAlreadyOwned
 
 from api.dependencies import get_robot_client_factory, get_robot_service
 from main import app
-from runtime.features import feature_names
+from robots.features import feature_names
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -149,21 +149,3 @@ def test_stream_disconnects_the_shared_robot_on_close(client: TestClient, shared
         websocket.receive_json()
 
     assert shared_robot.disconnect_calls == 1
-
-
-def test_stream_does_not_create_a_runtime_session(client: TestClient) -> None:
-    # Patch both the definition and the name bound in the owner: an in-process
-    # import of RuntimeProcessHost would otherwise miss the source-module patch.
-    with (
-        patch("runtime.transport.lock.SessionNameLock") as lock_cls,
-        patch("runtime.hosts.process_host.RuntimeProcessHost") as host_src,
-        patch("runtime.owner.RuntimeProcessHost") as host_bound,
-        patch("runtime.owner.RuntimeSessionOwner") as owner_cls,
-        client.websocket_connect(_url()) as websocket,
-    ):
-        websocket.receive_json()
-
-    lock_cls.assert_not_called()
-    host_src.assert_not_called()
-    host_bound.assert_not_called()
-    owner_cls.assert_not_called()

@@ -39,13 +39,7 @@ const components = {
             camera_ids: string[];
         }>
     ) => {
-        return (
-            <RobotCell
-                follower_id={props.params.follower_id}
-                leader_id={props.params.leader_id}
-                camera_ids={props.params.camera_ids}
-            />
-        );
+        return <RobotCell follower_id={props.params.follower_id} />;
     },
     camera: (props: IDockviewPanelProps<{ camera_id: string }>) => {
         return <CameraCell camera_id={props.params.camera_id} />;

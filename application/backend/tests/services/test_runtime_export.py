@@ -9,19 +9,16 @@ from physicalai.config import Config, validate_config
 from physicalai.runtime import RobotRuntime
 
 from robots.robot_client_factory import RobotClientFactory
-from runtime.config_builder import (
-    POLICY_REQUEST_THRESHOLD,
-    RUNTIME_FPS,
-    build_runtime_config,
-    policy_source_fragment,
-    runtime_camera_keys,
-    runtime_config_change_me,
-    runtime_export_readme,
-    runtime_identity_digest,
-)
 from schemas import SerialPortInfo
 from schemas.project_camera import CameraAdapter
 from schemas.robot import RobotAdapter
+from services.runtime_export import (
+    POLICY_REQUEST_THRESHOLD,
+    build_runtime_config,
+    policy_source_fragment,
+    runtime_config_change_me,
+    runtime_export_readme,
+)
 
 
 class FakePortFinder:
@@ -115,7 +112,7 @@ async def test_builder_marks_unstable_device_paths(mocker: Any) -> None:
 
 
 async def test_builder_refuses_a_robot_that_is_not_attached() -> None:
-    """A live session must not be handed a port nobody has seen."""
+    """Without ``allow_stored_port``, a port nobody has seen is refused."""
     with pytest.raises(ValueError, match="Could not resolve a serial port"):
         await build_runtime_config(
             follower=_robot("follower"),
@@ -167,60 +164,6 @@ async def test_change_me_lists_unstable_ports_not_the_accelerator(mocker: Any) -
         assert accelerator not in runtime_config_change_me(document)
 
 
-def _identity_document(
-    *,
-    fps: float = 30.0,
-    cameras: dict[str, object] | None = None,
-    leader: bool = False,
-) -> dict[str, Any]:
-    init_args: dict[str, Any] = {
-        "robot": {"class_path": "tests.runtime.fakes.FakeRobot", "init_args": {"name": "follower"}},
-        "cameras": cameras or {},
-        "fps": fps,
-    }
-    if leader:
-        init_args["action_source"] = {
-            "class_path": "physicalai.runtime.TeleopSource",
-            "init_args": {
-                "leader": {"class_path": "tests.runtime.fakes.FakeRobot", "init_args": {"name": "leader"}},
-            },
-        }
-    return {"class_path": "physicalai.runtime.RobotRuntime", "init_args": init_args}
-
-
-def test_identity_digest_ignores_cameras() -> None:
-    without_cameras = _identity_document()
-    with_cameras = _identity_document(cameras={"overhead camera": {"class_path": "unused"}})
-
-    assert runtime_identity_digest(without_cameras) == runtime_identity_digest(with_cameras)
-
-
-def test_identity_digest_changes_with_the_leader() -> None:
-    follower_only = _identity_document()
-    with_leader = _identity_document(leader=True)
-
-    assert runtime_identity_digest(follower_only) != runtime_identity_digest(with_leader)
-
-
-def test_identity_digest_changes_with_fps() -> None:
-    at_default = _identity_document(fps=RUNTIME_FPS)
-    at_half = _identity_document(fps=15.0)
-
-    assert runtime_identity_digest(at_default) != runtime_identity_digest(at_half)
-
-
-async def test_camera_keys_are_sorted_sanitized_names(mocker: Any) -> None:
-    _stub_device_paths(mocker)
-    document = await build_runtime_config(
-        follower=_robot("follower"),
-        leader=None,
-        cameras=[_camera(name="Zebra Cam"), _camera(name="Alpha/Cam")],
-        robot_factory=_robot_factory(),
-    )
-
-    assert runtime_camera_keys(document) == ["alpha_cam", "zebra cam"]
-
-
 async def test_cameras_validate_on_connect_and_never_overwrite(mocker: Any) -> None:
     _stub_device_paths(mocker)
     document = await build_runtime_config(
@@ -235,25 +178,25 @@ async def test_cameras_validate_on_connect_and_never_overwrite(mocker: Any) -> N
     assert shared_camera["overwrite_settings"] is False
 
 
-def test_policy_source_fragment_matches_the_session_recipe() -> None:
+def test_policy_source_fragment_is_independent_of_the_export_dir() -> None:
     export = policy_source_fragment(
         export_dir="./exports/torch",
         backend="torch",
         device="cpu",
         task="pick up the cube",
     )
-    session = policy_source_fragment(export_dir="/models/abc/exports/torch", backend="torch", device="cpu")
+    other = policy_source_fragment(export_dir="/models/abc/exports/torch", backend="torch", device="cpu")
 
     assert export["class_path"] == "physicalai.runtime.PolicySource"
-    assert export["init_args"]["execution"] == session["init_args"]["execution"]
-    assert export["init_args"]["action_queue"] == session["init_args"]["action_queue"]
+    assert export["init_args"]["execution"] == other["init_args"]["execution"]
+    assert export["init_args"]["action_queue"] == other["init_args"]["action_queue"]
     assert export["init_args"]["execution"]["class_path"] == "physicalai.runtime.SyncExecution"
     assert export["init_args"]["execution"]["init_args"]["request_threshold"] == POLICY_REQUEST_THRESHOLD
     assert "duration_frames" not in export["init_args"]["action_queue"]["init_args"]["smoother"]["init_args"]
     assert "policy_name" not in export["init_args"]["model"]["init_args"]
     assert export["init_args"]["model"]["init_args"]["export_dir"] == "./exports/torch"
     assert export["init_args"]["task"] == "pick up the cube"
-    assert "task" not in session["init_args"]
+    assert "task" not in other["init_args"]
 
 
 def test_empty_task_is_omitted_from_the_fragment() -> None:

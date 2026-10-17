@@ -13,23 +13,20 @@ import {
     Loading,
     minmax,
     Text,
-    ToastQueue,
     View,
 } from '@geti-ui/ui';
 import { ChevronLeft } from '@geti-ui/ui/icons';
 
 import { $api } from '../../../api/client';
 import { AppFooter } from '../../../components/app-footer/app-footer';
+import { RuntimeWipNotice } from '../../../components/runtime-wip/runtime-wip';
 import { useDatasetId } from '../../../features/datasets/use-dataset';
-import { RuntimeSessionProvider, useRuntimeSession } from '../../../features/robots/runtime-session-provider';
 import { paths } from '../../../paths';
-import { RecordingViewer } from './recording-viewer';
 
 import classes from './index.module.css';
 
 const TotalRecordedEpisodes = () => {
     const { dataset_id } = useDatasetId();
-    const { state } = useRuntimeSession();
 
     const episodeQuery = $api.useSuspenseQuery('get', '/api/dataset/{dataset_id}/episodes', {
         params: {
@@ -38,7 +35,7 @@ const TotalRecordedEpisodes = () => {
             },
         },
     });
-    const totalEpisodes = Number(episodeQuery.data?.length) + state.episodes_recorded;
+    const totalEpisodes = Number(episodeQuery.data?.length);
 
     if (totalEpisodes === 0 || isNaN(totalEpisodes)) {
         return null;
@@ -91,55 +88,55 @@ const RecordingPage = () => {
         }
     );
     return (
-        <RuntimeSessionProvider environment={environment} dataset={dataset} onError={ToastQueue.negative}>
-            <Grid
-                areas={['header', 'content', 'footer']}
-                UNSAFE_style={{
-                    // Footer track matches ProjectLayout's so the strip is the
-                    // same height here as on every other page.
-                    // eslint-disable-next-line max-len
-                    gridTemplateRows: `var(--spectrum-global-dimension-size-800, 4rem) ${minmax(0, '1fr')} var(--spectrum-global-dimension-size-400)`,
-                }}
-                minHeight={0}
-                height={'100%'}
-            >
-                <View backgroundColor={'gray-300'} gridArea={'header'}>
-                    <Flex
-                        height='100%'
-                        alignItems={'center'}
-                        marginX='1rem'
-                        gap='size-200'
-                        justifyContent={'space-between'}
+        <Grid
+            areas={['header', 'content', 'footer']}
+            UNSAFE_style={{
+                // Footer track matches ProjectLayout's so the strip is the
+                // same height here as on every other page.
+                // eslint-disable-next-line max-len
+                gridTemplateRows: `var(--spectrum-global-dimension-size-800, 4rem) ${minmax(0, '1fr')} var(--spectrum-global-dimension-size-400)`,
+            }}
+            minHeight={0}
+            height={'100%'}
+        >
+            <View backgroundColor={'gray-300'} gridArea={'header'}>
+                <Flex
+                    height='100%'
+                    alignItems={'center'}
+                    marginX='1rem'
+                    gap='size-200'
+                    justifyContent={'space-between'}
+                >
+                    <Link
+                        href={paths.project.datasets.show({ project_id, dataset_id })}
+                        isQuiet
+                        variant='overBackground'
                     >
-                        <Link
-                            href={paths.project.datasets.show({ project_id, dataset_id })}
-                            isQuiet
-                            variant='overBackground'
-                        >
-                            <Flex marginEnd='size-200' direction='row' gap='size-200' alignItems={'center'}>
-                                <Icon>
-                                    <ChevronLeft />
-                                </Icon>
-                                <Flex direction={'column'}>
-                                    <Text UNSAFE_className={classes.headerText}>Adding Episode</Text>
-                                    <Text UNSAFE_className={classes.subHeaderText}>
-                                        {environment.name} | {dataset.default_task}
-                                    </Text>
-                                </Flex>
+                        <Flex marginEnd='size-200' direction='row' gap='size-200' alignItems={'center'}>
+                            <Icon>
+                                <ChevronLeft />
+                            </Icon>
+                            <Flex direction={'column'}>
+                                <Text UNSAFE_className={classes.headerText}>Adding Episode</Text>
+                                <Text UNSAFE_className={classes.subHeaderText}>
+                                    {environment.name} | {dataset.default_task}
+                                </Text>
                             </Flex>
-                        </Link>
-                        <TotalRecordedEpisodes />
+                        </Flex>
+                    </Link>
+                    <TotalRecordedEpisodes />
+                </Flex>
+            </View>
+
+            <View gridArea={'content'} maxHeight={'100vh'} minHeight={0} height='100%'>
+                <View padding='size-200' height='100%'>
+                    <Flex height='100%' justifyContent='center' alignItems='center'>
+                        <RuntimeWipNotice feature='Recording' />
                     </Flex>
                 </View>
-
-                <View gridArea={'content'} maxHeight={'100vh'} minHeight={0} height='100%'>
-                    <View padding='size-200' height='100%'>
-                        <RecordingViewer />
-                    </View>
-                </View>
-                <AppFooter />
-            </Grid>
-        </RuntimeSessionProvider>
+            </View>
+            <AppFooter />
+        </Grid>
     );
 };
 

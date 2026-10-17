@@ -1,7 +1,12 @@
+"""Build a runnable ``physicalai.runtime`` config from Studio database rows.
+
+Studio does not run on ``physicalai.runtime`` itself. This module only writes the
+recipe a user downloads to run an environment or model outside Studio, so it is
+the one place that names ``physicalai.runtime`` classes.
+"""
+
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
@@ -9,12 +14,11 @@ from physicalai.capture import ColorMode, SharedCamera
 from physicalai.config import Config, validate_config
 from physicalai_studio_plugin import shared_robot_name
 
+from robots.features import sanitize_camera_name
 from robots.robot_client_factory import RobotClientFactory
-from runtime.features import sanitize_camera_name
 from utils.camera_factory import build_camera_config, is_migrated
 
 if TYPE_CHECKING:
-    from physicalai.runtime import PolicySource
     from physicalai_studio_plugin import CatalogRobotFactory, SerialPortInfo
 
     from schemas.project_camera import Camera
@@ -29,8 +33,7 @@ class _StoredPortFallback:
 
     An exported config describes how to reconnect on another machine, so an
     unplugged robot must not fail the download — ``runtime_config_change_me``
-    flags the unresolved path instead. A live session must never do this: by
-    then the stored path may belong to a different robot.
+    flags the unresolved path instead.
     """
 
     def __init__(self, port_finder: CatalogRobotFactory) -> None:
@@ -73,9 +76,9 @@ def policy_source_fragment(
     device: str,
     task: str | None = None,
 ) -> dict[str, Any]:
-    """Return the PolicySource recipe both the session and the export instantiate.
+    """Return the PolicySource recipe the inference export instantiates.
 
-    `` Omit ``policy_name`` so the manifest is read. Omit ``duration_frames`` so
+    Omit ``policy_name`` so the manifest is read. Omit ``duration_frames`` so
     ``LerpSmoother`` keeps its upstream default of 5.
     """
     init_args: dict[str, Any] = {
@@ -95,32 +98,6 @@ def policy_source_fragment(
     if task:
         init_args["task"] = task
     return Config("physicalai.runtime.PolicySource", init_args).to_dict()
-
-
-def policy_source_from_fragment(fragment: dict[str, Any]) -> PolicySource:
-    """Build the live PolicySource from ``policy_source_fragment``.
-
-    ``instantiate()`` cannot construct ``InferenceModel`` through this path
-    when tests replace it with a local double. Read the fragment and call
-    the same constructors Studio already uses.
-    """
-    from physicalai.inference import InferenceModel
-    from physicalai.runtime import ChunkedActionQueue, LerpSmoother, PolicySource, SyncExecution
-
-    args = fragment["init_args"]
-    model_args = args["model"]["init_args"]
-    exec_args = args["execution"]["init_args"]
-    return PolicySource(
-        model=InferenceModel(
-            export_dir=model_args["export_dir"],
-            policy_name=None,
-            backend=model_args["backend"],
-            device=model_args["device"],
-        ),
-        execution=SyncExecution(request_threshold=exec_args["request_threshold"]),
-        action_queue=ChunkedActionQueue(smoother=LerpSmoother()),
-        task=args.get("task"),
-    )
 
 
 def runtime_export_readme(document: dict[str, Any], *, unresolved: list[str]) -> str:
@@ -179,8 +156,7 @@ async def build_runtime_config(
     is not plugged in, while a session about to drive that rig must not guess.
 
     Pass ``action_source`` to pin a PolicySource fragment for a headless
-    export. The live session leaves it unset and wraps TeleopSource itself
-    when a leader is present.
+    export. Without it, a leader becomes a TeleopSource.
     """
     port_finder: CatalogRobotFactory = _StoredPortFallback(robot_factory) if allow_stored_port else robot_factory
     follower_config = await _shared_robot_config(follower, robot_factory, port_finder)
@@ -214,30 +190,6 @@ async def build_runtime_config(
     document = Config("physicalai.runtime.RobotRuntime", init_args).to_dict()
     validate_config(document)
     return cast("dict[str, Any]", document)
-
-
-def runtime_identity_digest(document: dict[str, Any]) -> str:
-    """Identify the hardware a session is driving, so a client cannot attach to a different rig.
-
-    Covers the robot recipe, the leader recipe and fps — everything that
-    physically determines what the arm does. Cameras are deliberately excluded:
-    they are read-only observation, a client that needs more can restart the
-    session, and including them would make every camera edit in the environment
-    form look like a rig change. See runtime-process-context.md#decisions.
-    """
-    init_args = document["init_args"]
-    identity = {
-        "robot": init_args["robot"],
-        "action_source": init_args.get("action_source"),
-        "fps": init_args["fps"],
-    }
-    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-def runtime_camera_keys(document: dict[str, Any]) -> list[str]:
-    """Return the sorted camera feature keys this document declares."""
-    return sorted(document["init_args"].get("cameras", {}))
 
 
 def _is_unstable_host_path(key: str, item: object) -> bool:

@@ -1,8 +1,15 @@
+from dataclasses import dataclass
+
 import numpy as np
 
-from runtime.features import feature_names, observation_to_dict, sanitize_camera_name
+from robots.features import feature_names, observation_to_dict, sanitize_camera_name
 
-from .fakes import FakeObservation
+
+@dataclass
+class FakeObservation:
+    joint_positions: np.ndarray
+    timestamp: float
+    sensor_data: dict[str, np.ndarray] | None = None
 
 
 def test_feature_names_and_observation_values_have_the_same_order() -> None:

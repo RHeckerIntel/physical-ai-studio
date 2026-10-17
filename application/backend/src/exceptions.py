@@ -260,23 +260,6 @@ class CameraSettingsConflictError(BaseException):
         )
 
 
-class RuntimeSessionBusyError(BaseException):
-    """Raised when a live runtime session already holds the robot being asked for."""
-
-    def __init__(self, *, robot_name: str | None = None, pid: int | None = None) -> None:
-        subject = f"Robot {robot_name!r} is" if robot_name else "This robot is"
-        holder = f" (pid {pid})" if pid is not None else ""
-        message = (
-            f"{subject} already in use by a running session{holder}. "
-            "Stop that session, or wait for it to disconnect, then try again."
-        )
-        super().__init__(
-            message=message,
-            error_code="runtime_session_busy",
-            http_status=http.HTTPStatus.LOCKED,
-        )
-
-
 class RobotDeviceAlreadyOwnedError(BaseException):
     """Raised when a SharedRobot device is already locked under another session name."""
 

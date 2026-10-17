@@ -1,5 +1,7 @@
 # Runtime Session Architecture
 
+> **Outdated.** This page describes the runtime that was removed in Phase 0 of the runtime inhousing work (`src/runtime/`, `/runtime/ws`, the detached session process). It is kept until the new architecture replaces it. See [the runtime inhousing plan](../feature_plans/runtime-inhousing-plan.md) for the design that replaces it.
+
 Studio drives a physical robot four ways: teleoperation by hand, running a trained policy, recording a dataset, and exporting a model that reproduces the run elsewhere. All four run on one session, a long-lived process that owns the robot and its cameras for as long as you are working with them. Each capability arrives as a command sent to that session.
 
 This replaced two hand-written control loops (`TeleoperateWorker`, `RobotControlWorker`) and a separate model-worker process pool. Studio no longer owns loop machinery, timing, or teardown ordering. It owns three things: which action to send, what to stream to the browser, and what to write to a dataset. `physicalai.runtime.RobotRuntime` runs the loop.

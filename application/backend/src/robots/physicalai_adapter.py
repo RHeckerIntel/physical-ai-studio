@@ -6,9 +6,9 @@ from loguru import logger
 from physicalai.robot import RobotError
 from physicalai.robot.interface import Robot, RobotObservation
 
+from robots.features import feature_names, observation_to_dict
 from robots.robot_client import RobotClient
 from robots.shared_robot_errors import translate_robot_error
-from runtime.features import feature_names, observation_to_dict
 
 
 @dataclass(frozen=True)
