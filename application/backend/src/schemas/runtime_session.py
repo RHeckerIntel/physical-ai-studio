@@ -50,7 +50,18 @@ class MoveControlConfig(BaseModel):
     hz: float = Field(50, gt=0, le=500)
 
 
-ControlConfig = Annotated[TeleopControlConfig | MoveControlConfig, Field(discriminator="type")]
+class ReplayControlConfig(BaseModel):
+    """Play one of the loaded dataset's episodes on the follower, at the dataset's fps, then hold its last frame.
+
+    Only episodes on disk: those recorded this session reach the dataset when the recording is finished.
+    """
+
+    type: Literal["replay"] = "replay"
+    episode_index: int = Field(ge=0)
+    grace_s: float = Field(3, ge=0, le=30, description="The follower moves to the episode's first frame over this long")
+
+
+ControlConfig = Annotated[TeleopControlConfig | MoveControlConfig | ReplayControlConfig, Field(discriminator="type")]
 
 
 class LoadEnvironmentCommand(BaseModel):

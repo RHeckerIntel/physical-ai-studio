@@ -8,9 +8,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from runtime_session.controls import MoveControl, TeleopControl, build_control
+from runtime_session.controls import MoveControl, ReplayControl, TeleopControl, build_control
 from runtime_session.store import ACTION, STATE, FeatureSpec, Store
-from schemas.runtime_session import MoveControlConfig, TeleopControlConfig
+from schemas.dataset import Episode
+from schemas.runtime_session import MoveControlConfig, ReplayControlConfig, TeleopControlConfig
 from tests.workers.fake_robot import FakeRobot
 from workers.base import WorkerStartupError
 
@@ -113,3 +114,39 @@ async def test_a_control_runs_as_a_thread_until_stopped(store: Store, tmp_path: 
     first = store.read(ACTION).timestamp
     await asyncio.sleep(0.05)
     assert store.read(ACTION).timestamp == first  # stopped writing
+
+
+def _episode(actions: list[list[float]], keys: tuple[str, ...] = JOINTS) -> Episode:
+    return Episode(
+        episode_index=0, length=len(actions), fps=10, tasks=[], actions=actions, action_keys=list(keys), videos={}
+    )
+
+
+def test_replay_moves_to_the_first_frame_then_plays_at_the_recorded_rate(store: Store) -> None:
+    control = ReplayControl(
+        store, _episode([[4.0, 0.0], [5.0, 1.0], [6.0, 2.0]]), ReplayControlConfig(episode_index=0, grace_s=1.0)
+    )
+    control.on_start()
+    control.started_at = time.monotonic() - 0.5  # halfway to the first frame
+    control.on_tick()
+    np.testing.assert_allclose(store.read(ACTION).value, [2.0, 5.0], atol=0.1)
+
+    control.started_at = time.monotonic() - 1.15  # 0.15 s into the episode, at 10 fps: frame 1
+    control.on_tick()
+    action = store.read(ACTION)
+    assert action.value.tolist() == [5.0, 1.0]
+    assert action.timestamp == pytest.approx(control.started_at + 1.0 + 0.1)
+
+    control.started_at = time.monotonic() - 10.0  # long done: holds the last frame
+    control.on_tick()
+    assert store.read(ACTION).value.tolist() == [6.0, 2.0]
+
+
+def test_replay_refuses_an_episode_of_other_joints(store: Store) -> None:
+    with pytest.raises(ValueError, match="drives joints"):
+        ReplayControl(store, _episode([[1.0]], ("elbow.pos",)), ReplayControlConfig(episode_index=0))
+
+
+def test_replay_needs_the_episode(store: Store) -> None:
+    with pytest.raises(ValueError, match="not in the dataset"):
+        build_control(ReplayControlConfig(episode_index=3), store, None)

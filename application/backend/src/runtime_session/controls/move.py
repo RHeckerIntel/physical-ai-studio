@@ -21,7 +21,7 @@ class MoveControl(Control):
         unknown = set(target) - set(store.spec.joint_names)
         if unknown:
             raise ValueError(f"Unknown joints {sorted(unknown)}; the follower has {list(store.spec.joint_names)}")
-        super().__init__(store, config, name="MoveControl")
+        super().__init__(store, config, name="MoveControl", hz=config.hz)
         self.target_by_name = target
         self.duration_s = config.duration_s
         self.start_position: np.ndarray = np.zeros(len(store.spec.joint_names))

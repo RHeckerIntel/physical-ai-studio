@@ -238,7 +238,7 @@ The joint names come namespaced the way the dataset stores them (e.g. `shoulder_
 - **Controls:**
   - `MoveControl` interpolates from the current state to a target over T and then holds. It is also the right thing to run when switching between controls.
   - `TeleopControl` borrows the environment's leader driver, and each tick reads it and writes `action`. Robot-specific subclasses can drive the leader too (set its position, change torque). Stopping it leaves the leader connected.
-  - `ReplayControl` plays a loaded dataset's episode into `action` at the dataset fps, writing each frame's timestamp as `start + frame_index / fps`. It needs a loaded dataset and an environment whose spec matches it.
+  - `ReplayControl` plays a loaded dataset's episode into `action` at the dataset fps, writing each frame's timestamp as `start + frame_index / fps`, then holds the last frame. It needs a loaded dataset and an environment whose spec matches it. The session reads the episode from the dataset on disk, not from the dataset worker.
   - `ModelControl` borrows the loaded policy, snapshots the store into an observation, runs inference with `t0 = observation timestamp`, and samples a clock-indexed chunk queue at control hz. This is where the time-based `ActionChunk` work is ported over. Order: sync first, then async with a separate inference thread, then smoothing, and RTC last. Open for Phase 8: inference then runs in the API process, so measure whether Python-side preprocessing holding the GIL makes the websocket stutter before settling on that.
 - **Switching control:** stop the old control (join), re-seed `action` from the current state, then start the new one. That keeps the one-active-control rule structural instead of arbitrated.
 
@@ -326,9 +326,8 @@ The record and inference pages become one session workspace: the dock (the follo
 - **Parts panel**, at the top of the side bar in every mode. The environment, dataset and model are each shown with their status (loading, loaded, error), with **reload**, **swap** (a picker of the project's environments, datasets or models) and **unload**.
   - **Swapping can change the feature spec.** A load that would conflict with what is loaded fails with `incompatible_parts`, listing each conflicting part and why (the `Mismatch` reasons), and changes nothing. The UI shows that as a confirm dialog ("Unload dataset *X*, recorded with other cameras?") and sends the load again with `unload_incompatible: true`.
   - **Swapping the environment** unloads the old one with its control and dataset, loads the new one, and loads the dataset again if it is compatible with the new environment. A dataset is tied to its environment, so this can be confusing, but that is left to the user.
-- **Episodes recorded this session can be replayed** without finishing the recording: the dataset worker's cache holds the dataset copied in at load plus every episode saved since. The worker serves `rpc/episode_actions {episode_index}` (that episode's action trajectory and fps), and `ReplayControl` plays it in the session process. It uses the same grace move to the first frame as teleop.
-  - **Risk to check first:** that lerobot can read an episode's actions back from a dataset still open for writing, after `save_episode`. Only the parquet is needed, not the video.
-  - **Fallback:** replay only the episodes already in the dataset, plus a "Finish recording" action that copies the cache back.
+- **Replay is for looking at a dataset, not for recording.** `ReplayControl` plays an episode from the dataset as it is on disk, read in the session process, with the same grace move to the first frame as teleop.
+  - **Episodes recorded this session are not replayable until the recording is finished.** The dataset worker records into a mutation, a copy in the cache, which is copied back into the dataset only when the recording is finished. Replay reads the dataset itself, so it never touches the worker.
 
 ### Frontend
 
@@ -472,8 +471,9 @@ The record and inference pages become one session workspace: the dock (the follo
        - `state.environment.environment_id` names the saved environment.
      - Not done: a reconnect reloads what the page opened with, not what was swapped in since.
    - 7c (after 7b-2): replay.
-     - First check that the dataset worker can read an episode's actions back while recording.
-     - Then `rpc/episode_actions` on the worker, `ReplayControl` with a grace move to the first frame, and replay mode with an episode dropdown or index field.
+     - `ReplayControlConfig {episode_index, grace_s}` through `set_control`. The session reads the episode of the loaded dataset from disk (`find_episode`), and `ReplayControl` plays it at the dataset's fps after a grace move to the first frame, then holds the last frame.
+     - Replay mode in the workspace: the dataset's episodes with their length, play / stop, and progress timed in the browser.
+     - Play is disabled while an episode is being recorded, which would record the replay.
 8. **ModelControl:** port the policy execution off `physicalai.runtime` (sync, async with the time-based chunk queue, smoothing). Introduce `ModelControlConfig` and switch `services/runtime_export.py` over to it, along with the export round-trip test. The **inference page** comes back on the new provider, and the `RUNTIME_WIP` flag is deleted. Measure with the oracle model: `actions[i] = f(t0 + i)`.
    - The inference page comes back as the session workspace's inference mode, with the model in the parts panel.
 9. **Finish:**

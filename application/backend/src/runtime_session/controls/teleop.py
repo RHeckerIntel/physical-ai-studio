@@ -30,7 +30,7 @@ class TeleopControl(Control):
             raise ValueError(
                 f"The leader's joints {leader_joints} do not match the follower's {store.spec.joint_names}"
             )
-        super().__init__(store, config, name="TeleopControl")
+        super().__init__(store, config, name="TeleopControl", hz=config.hz)
         self.leader = leader
         self.grace_s = config.grace_s
         self.start_position: np.ndarray | None = None

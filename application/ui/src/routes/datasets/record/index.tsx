@@ -30,6 +30,7 @@ import {
     useRuntimeSession,
 } from '../../../features/runtime-session/runtime-session-provider';
 import { RecordMode } from '../../../features/runtime-session/workspace/record-mode';
+import { ReplayMode } from '../../../features/runtime-session/workspace/replay-mode';
 import { SessionWorkspace } from '../../../features/runtime-session/workspace/session-workspace';
 import { paths } from '../../../paths';
 
@@ -139,6 +140,12 @@ const RecordingSession = ({ dataset }: { dataset: SchemaDatasetOutput }) => {
                     label: 'Record',
                     parts: [{ label: 'Dataset', isLoaded: state?.dataset != null }],
                     panel: <RecordMode />,
+                },
+                {
+                    key: 'replay',
+                    label: 'Replay',
+                    parts: [{ label: 'Dataset', isLoaded: state?.dataset != null }],
+                    panel: <ReplayMode />,
                 },
             ]}
             cancelHref={paths.project.datasets.show({ project_id: dataset.project_id, dataset_id: dataset.id! })}

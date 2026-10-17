@@ -17,7 +17,7 @@ from runtime_session.dataset import DEFAULT_RECORDING_FPS, dataset_fps, dataset_
 from runtime_session.session import RuntimeSession
 from runtime_session.store import FeatureSpecMismatchError, ImageSpec
 from schemas.dataset import Dataset
-from schemas.runtime_session import DiscardEpisodeCommand, SaveEpisodeCommand, StartEpisodeCommand
+from schemas.runtime_session import DiscardEpisodeCommand, ReplayControlConfig, SaveEpisodeCommand, StartEpisodeCommand
 from tests.workers.fake_dataset import FakeDatasetWorker, recording_log
 from workers.dataset_worker import RecordingStatus
 
@@ -303,3 +303,24 @@ async def test_a_dead_dataset_worker_unloads_the_dataset(new_session, fake_camer
     assert status.state == "failed"
     await _until(lambda: session.state().dataset is None)
     assert session.environment is not None  # the environment stays loaded
+
+
+async def test_replay_plays_episodes_on_disk_only(new_session, fake_cameras) -> None:
+    """Through lerobot: an episode reaches replay once the recording that saved it is finished."""
+    dataset = _dataset()
+    session = await new_session()
+    await session.load_environment(make_environment())
+    with pytest.raises(RuntimeSessionCommandError, match="Load a dataset"):
+        await session.set_control(ReplayControlConfig(episode_index=0))
+    await session.load_dataset(dataset)
+    await _start(session, "pick the block")
+    await asyncio.sleep(0.4)
+    await _save(session)
+    # Saved, but still in the recording's cache.
+    with pytest.raises(ValueError, match="not in the dataset"):
+        await session.set_control(ReplayControlConfig(episode_index=0))
+
+    await session.unload_dataset()
+    await session.load_dataset(dataset)
+    await session.set_control(ReplayControlConfig(episode_index=0, grace_s=0))
+    assert session.state().control == ReplayControlConfig(episode_index=0, grace_s=0)
