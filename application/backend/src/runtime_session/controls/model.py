@@ -38,6 +38,10 @@ class ModelControl(Control):
     chunk, queues and smooths it, as an exported runtime does; only the model
     runs in its own process. With ``async`` execution the chunk is requested on the executor's
     own thread while the queue keeps playing.
+
+    A model can command a pose far from where the follower is (its rest pose,
+    say), so for the first ``grace_s`` the command blends from where the
+    follower was to the model's action. The model keeps running on the measured state meanwhile.
     """
 
     def __init__(self, store: Store, model: ProcessModel, config: ModelControlConfig) -> None:
@@ -53,8 +57,15 @@ class ModelControl(Control):
             cast("Any", model), execution, ChunkedActionQueue(smoother=LerpSmoother()), task=config.task or None
         )
         self.step = 0
+        self.grace_s = config.grace_s
+        self.start_position: np.ndarray | None = None
+        self.started_at = 0.0
 
     def on_start(self) -> None:
+        state = self.store.read(STATE)
+        # Without a measured follower there is nothing to blend from; take the model's actions directly.
+        self.start_position = state.value if state is not None else None
+        self.started_at = time.monotonic()
         # Without callbacks there is no bus to give it; executors only emit to one they have.
         self.source.connect(bus=cast("Any", None), session_id="")
 
@@ -67,4 +78,8 @@ class ModelControl(Control):
             return  # nothing to infer from until the follower is measured
         action = self.source.update(_Observation(state.value, state.timestamp), {}, self.step)
         self.step += 1
-        self.store.write(ACTION, action, timestamp=time.monotonic())
+        now = time.monotonic()
+        elapsed = now - self.started_at
+        if self.start_position is not None and elapsed < self.grace_s:
+            action = self.start_position + (action - self.start_position) * (elapsed / self.grace_s)
+        self.store.write(ACTION, action, timestamp=now)

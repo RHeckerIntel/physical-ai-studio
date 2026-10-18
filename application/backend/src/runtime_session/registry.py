@@ -9,6 +9,7 @@ another session gets a ``device_in_use`` error that says which session to close.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -82,6 +83,17 @@ class RuntimeSessionRegistry:
         """Raises ``DeviceInUseError`` when a session holds the robot."""
         if (holder := self._robots.get(robot_id)) is not None:
             raise DeviceInUseError(device=f"Robot {name!r}", holder=holder.label)
+
+    async def until_closed(self, within: float) -> None:
+        """Wait for every session that is closing to let go of its devices; give up after ``within`` seconds.
+
+        A page that opens a session usually just closed one on the same devices, which
+        takes a moment to disconnect them.
+        """
+        closing = [session.finished.wait() for session in self.sessions() if session.closed.is_set()]
+        if closing:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.gather(*closing), within)
 
     async def close_all(self) -> None:
         await asyncio.gather(*(session.stop() for session in self.sessions()))

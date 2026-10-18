@@ -1,6 +1,6 @@
 import { ReactNode, Suspense, useEffect, useRef, useState } from 'react';
 
-import { Button, Flex, Heading, Loading, ProgressCircle, StatusLight, Text, View } from '@geti-ui/ui';
+import { Button, Flex, Heading, Loading, ProgressCircle, Text, View } from '@geti-ui/ui';
 import {
     DockviewApi,
     DockviewReact,
@@ -15,14 +15,7 @@ import { InlineAlert } from '../robots/setup-wizard/shared/inline-alert';
 import { CameraCell } from './cells/camera-cell';
 import { RobotCell } from './cells/robot-cell';
 import { failureOf, useRuntimeSession } from './runtime-session-provider';
-
-/** Something a page waits for before its session is usable, such as the environment or a dataset. */
-export interface SessionPart {
-    label: string;
-    isLoaded: boolean;
-    /** Why it failed; it stays unloaded until it is loaded again. */
-    error?: string | null;
-}
+import { usePartControls } from './workspace/part-controls';
 
 const components = {
     // The workspace's side bar has the Teleoperate switch.
@@ -84,31 +77,43 @@ const SessionDock = ({ environment }: { environment: SchemaSessionEnvironment })
     );
 };
 
-const Initializing = ({ parts, cancelHref }: { parts: SessionPart[]; cancelHref: string }) => {
-    const { error } = useRuntimeSession();
+/** Until the environment is up: what it is doing, or a way to load one when the session has none. */
+const Initializing = ({ cancelHref }: { cancelHref: string }) => {
+    const { state, error, statuses, loading, retry } = useRuntimeSession();
+    const { pendingPart, act } = usePartControls();
+    const failure = failureOf(statuses, 'environment');
+    const isIdle = state !== null && state.environment == null && loading === null && pendingPart === null;
 
     return (
         <Flex width='100%' height={'100%'} alignItems={'center'} justifyContent={'center'} direction={'column'}>
             <Heading level={2}>
-                <Text>Initializing</Text>
-                {error === null && !parts.some((part) => part.error) && (
+                <Text>{isIdle ? 'No environment loaded' : 'Initializing'}</Text>
+                {!isIdle && error === null && failure === null && (
                     <ProgressCircle marginStart='size-200' size='S' isIndeterminate alignSelf={'center'} />
                 )}
             </Heading>
             <Flex direction='column' margin='size-200' gap='size-100'>
-                {parts.map(({ label, isLoaded, error: partError }) => (
-                    <Flex key={label} direction='column' gap='size-50'>
-                        <StatusLight variant={isLoaded ? 'positive' : partError ? 'negative' : 'yellow'}>
-                            {label}
-                        </StatusLight>
-                        {partError && <InlineAlert variant='error'>{partError}</InlineAlert>}
-                    </Flex>
-                ))}
+                {failure !== null && <InlineAlert variant='error'>{failure}</InlineAlert>}
                 {error !== null && <InlineAlert variant='error'>{error.message}</InlineAlert>}
             </Flex>
-            <Button variant={'secondary'} href={cancelHref}>
-                Cancel
-            </Button>
+            <Flex gap='size-100'>
+                <Button variant={'secondary'} href={cancelHref}>
+                    Cancel
+                </Button>
+                {isIdle && error !== null && (
+                    <Button variant='accent' onPress={retry}>
+                        Try again
+                    </Button>
+                )}
+                {isIdle && (
+                    <Button
+                        variant={error !== null ? 'secondary' : 'accent'}
+                        onPress={() => act('environment', 'swap')}
+                    >
+                        Load environment…
+                    </Button>
+                )}
+            </Flex>
         </Flex>
     );
 };
@@ -116,32 +121,15 @@ const Initializing = ({ parts, cancelHref }: { parts: SessionPart[]; cancelHref:
 /**
  * A session's robot and cameras in a dock, under an optional toolbar.
  *
- * The middle of the session workspace. Until the environment and every one of ``parts`` is
- * loaded it shows what it is waiting for instead. Once it has shown the dock, it keeps showing
- * it while a part fails or reloads; the parts panel says what is wrong.
+ * The middle of the session workspace. Until the environment is loaded it shows what it is
+ * waiting for instead; what a mode needs besides is the side bar's to say. Once it has shown
+ * the dock, it keeps showing it while the environment fails or reloads.
  */
-export const SessionViewer = ({
-    toolbar,
-    parts,
-    cancelHref,
-}: {
-    toolbar?: ReactNode;
-    parts: SessionPart[];
-    cancelHref: string;
-}) => {
+export const SessionViewer = ({ toolbar, cancelHref }: { toolbar?: ReactNode; cancelHref: string }) => {
     const { state, statuses } = useRuntimeSession();
     const environment = state?.environment;
-    const environmentFailure = failureOf(statuses, 'environment');
-    const allParts = [
-        {
-            label: 'Environment',
-            isLoaded: environment != null && environmentFailure === null,
-            error: environmentFailure,
-        },
-        ...parts,
-    ];
 
-    const isReady = environment != null && allParts.every((part) => part.isLoaded);
+    const isReady = environment != null && failureOf(statuses, 'environment') === null;
     const [hasStarted, setHasStarted] = useState(false);
     // Adjusted while rendering: started once ready, and over once the environment is unloaded.
     if (hasStarted !== (isReady || (hasStarted && environment != null))) {
@@ -149,7 +137,7 @@ export const SessionViewer = ({
     }
 
     if (environment == null || !(isReady || hasStarted)) {
-        return <Initializing parts={allParts} cancelHref={cancelHref} />;
+        return <Initializing cancelHref={cancelHref} />;
     }
 
     return (

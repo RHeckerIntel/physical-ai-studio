@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { Button, Flex, Item, Picker, Slider, TextArea, toast } from '@geti-ui/ui';
 
+import { $api } from '../../../api/client';
 import { SchemaExecutionConfig, SchemaModelControlConfig } from '../../../api/openapi-spec';
 import { ERROR_TOAST, failureOf, useRuntimeSession } from '../runtime-session-provider';
 
@@ -10,9 +11,28 @@ const EXECUTION_MODES: { key: SchemaExecutionConfig['mode']; label: string }[] =
     { key: 'async', label: 'Asynchronous' },
 ];
 
+/** The default task of the dataset the loaded model was trained on, or none. */
+const useDefaultTask = (model_id: string | undefined) => {
+    const { data: model } = $api.useQuery(
+        'get',
+        '/api/models/{model_id}',
+        { params: { path: { model_id: model_id ?? '' } } },
+        { enabled: model_id !== undefined }
+    );
+    const dataset_id = model?.model.dataset_id ?? undefined;
+    const { data: dataset } = $api.useQuery(
+        'get',
+        '/api/dataset/{dataset_id}',
+        { params: { path: { dataset_id: dataset_id ?? '' } } },
+        { enabled: dataset_id !== undefined }
+    );
+    return dataset?.default_task ?? '';
+};
+
 /** Inference mode's side bar: the task and how chunks are requested, then play / stop. */
-export const InferenceMode = ({ defaultTask }: { defaultTask: string }) => {
+export const InferenceMode = () => {
     const { state, statuses, send } = useRuntimeSession();
+    const defaultTask = useDefaultTask(state?.model?.model_id);
     const [task, setTask] = useState(defaultTask);
     const [mode, setMode] = useState<SchemaExecutionConfig['mode']>('sync');
     const [threshold, setThreshold] = useState(0.5);
@@ -40,7 +60,14 @@ export const InferenceMode = ({ defaultTask }: { defaultTask: string }) => {
     };
 
     const play = () =>
-        void setControl({ type: 'model', task, hz: 30, execution: { mode, request_threshold: threshold } });
+        void setControl({
+            type: 'model',
+            task,
+            hz: 30,
+            execution: { mode, request_threshold: threshold },
+            // The follower eases onto the model's actions, which may start far from where it is.
+            grace_s: 3,
+        });
 
     return (
         <Flex direction='column' gap='size-200'>

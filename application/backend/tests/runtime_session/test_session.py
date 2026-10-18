@@ -83,6 +83,19 @@ async def test_another_session_cannot_take_the_robot(new_session, fake_cameras) 
     await second.stop()
 
 
+async def test_a_load_waits_for_a_closing_session_to_let_go_of_its_devices(new_session, fake_cameras) -> None:
+    # A page that opens a session has usually just closed one on the same devices.
+    first, second = await new_session(), await new_session()
+    await first.load_environment(make_environment())
+    closing = asyncio.create_task(first.stop())
+    await asyncio.sleep(0)  # the teardown has started, the devices are not let go yet
+    assert first.closed.is_set() and not first.finished.is_set()
+    await second.load_environment(make_environment())
+    assert closing.done()
+    assert second.environment is not None
+    await second.stop()
+
+
 async def test_a_failed_connect_loads_the_environment_failed_to_reload(
     new_session, registry, robot_factory, tmp_path
 ) -> None:

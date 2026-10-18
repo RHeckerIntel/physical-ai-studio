@@ -34,7 +34,7 @@ export const ReplayMode = () => {
     const dataset = state?.dataset ?? undefined;
 
     if (dataset === undefined) {
-        return <Text>Load a dataset to replay its episodes.</Text>;
+        return null; // the workspace says what is missing
     }
     return (
         <EpisodePlayer

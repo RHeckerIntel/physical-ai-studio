@@ -110,15 +110,22 @@ class Channel<T> {
     }
 }
 
+/** The parts a session loads: the environment, and what records from it or runs on it. */
+export type SessionPartName = 'environment' | 'dataset' | 'model';
+
 interface RuntimeSessionContextValue {
     state: SchemaSessionState | null;
     /** The last command or worker error, until the next successful load. */
     error: SchemaErrorMessage | null;
     statuses: Statuses;
+    /** What the provider is loading for the page: the environment, then the dataset and model it was given. */
+    loading: SessionPartName | null;
     isLoading: boolean;
     observations: Channel<SchemaObservationMessage>;
     frame: (key: string) => Channel<Blob>;
     send: (command: Command) => Promise<SchemaAckMessage>;
+    /** Load what the page asked for again, after it was refused (a device a closing session still held, say). */
+    retry: () => void;
 }
 
 const RuntimeSessionContext = createContext<RuntimeSessionContextValue | null>(null);
@@ -175,7 +182,9 @@ export const RuntimeSessionProvider = ({
     const [state, setState] = useState<SchemaSessionState | null>(null);
     const [error, setError] = useState<SchemaErrorMessage | null>(null);
     const [statuses, setStatuses] = useState<Statuses>({});
-    const [isLoading, setIsLoading] = useState(false);
+    const [loading, setLoading] = useState<SessionPartName | null>(null);
+    const [attempt, setAttempt] = useState(0);
+    const retry = useCallback(() => setAttempt((previous) => previous + 1), []);
     const observations = useRef(new Channel<SchemaObservationMessage>()).current;
     const frames = useRef(new Map<string, Channel<Blob>>()).current;
     const pending = useRef(new Map<string, (ack: SchemaAckMessage) => void>()).current;
@@ -279,14 +288,16 @@ export const RuntimeSessionProvider = ({
                 loaded.backend !== toLoad.backend ||
                 loaded.device !== toLoad.device);
         const reload = async () => {
-            setIsLoading(true);
+            setLoading('environment');
             await send({ command: 'unload_environment' });
             if (draft !== null && draft.robots.length > 0 && !cancelled) {
                 let ack = await send({ command: 'load_environment', environment: draft, unload_incompatible: false });
                 if (ack.ok && loadDataset && dataset_id !== undefined && !cancelled) {
+                    setLoading('dataset');
                     ack = await send({ command: 'load_dataset', dataset_id });
                 }
                 if (ack.ok && loadModel && toLoad !== null && !cancelled) {
+                    setLoading('model');
                     ack = await send({ command: 'load_model', ...toLoad });
                 }
                 if (!cancelled) {
@@ -294,18 +305,18 @@ export const RuntimeSessionProvider = ({
                 }
             }
             if (!cancelled) {
-                setIsLoading(false);
+                setLoading(null);
             }
         };
         void reload();
         return () => {
             cancelled = true;
         };
-    }, [environmentKey, dataset_id, modelKey, hasSession, send]);
+    }, [environmentKey, dataset_id, modelKey, hasSession, send, attempt]);
 
     const value = useMemo(
-        () => ({ state, error, statuses, isLoading, observations, frame, send }),
-        [state, error, statuses, isLoading, observations, frame, send]
+        () => ({ state, error, statuses, loading, isLoading: loading !== null, observations, frame, send, retry }),
+        [state, error, statuses, loading, observations, frame, send, retry]
     );
 
     return <RuntimeSessionContext.Provider value={value}>{children}</RuntimeSessionContext.Provider>;

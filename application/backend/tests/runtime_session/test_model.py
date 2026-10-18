@@ -9,12 +9,14 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+import numpy as np
 import pytest
 
 from exceptions import RuntimeSessionCommandError
-from runtime_session.model import model_inputs
+from runtime_session.controls.model import ModelControl
+from runtime_session.model import ModelInputs, model_inputs
 from runtime_session.session import RuntimeSession
-from runtime_session.store import STATE, FeatureSpec, ImageSpec
+from runtime_session.store import ACTION, STATE, FeatureSpec, ImageSpec, Store
 from schemas.model import Model
 from schemas.runtime_session import ExecutionConfig, ModelControlConfig
 from tests.workers.fake_model import FakeModelWorker
@@ -75,7 +77,7 @@ async def test_the_model_drives_the_follower(new_session, fake_cameras, fake_mod
     assert session.state().model.name == "Picker"
 
     start = session.store.read(STATE).value.copy()
-    config = ModelControlConfig(task="pick", hz=50, execution=ExecutionConfig(mode=mode))
+    config = ModelControlConfig(task="pick", hz=50, execution=ExecutionConfig(mode=mode), grace_s=0)
     await session.set_control(config)
     assert session.state().control == config
     # The oracle commands state + 1 and up, so a follower it drives keeps climbing.
@@ -121,3 +123,37 @@ async def test_a_dead_model_worker_unloads_the_model_and_holds(
     await _until(lambda: session.state().model is None and session.state().control is None)
     # The environment is untouched.
     assert session.state().environment is not None
+
+
+class _FarModel:
+    """Commands a pose far from the follower, as a model heading for its rest pose does."""
+
+    inputs = ModelInputs(state_size=2, images={})
+
+    def predict_action_chunk(self, observation: dict) -> np.ndarray:
+        return np.full((10, 2), 50.0, dtype=np.float32)
+
+    def reset(self) -> None:
+        pass
+
+
+def test_the_model_closes_the_gap_to_its_actions_over_the_grace_period() -> None:
+    store = Store.create(FeatureSpec(("shoulder_pan.pos", "gripper.pos")), uuid4().hex)
+    try:
+        store.write(STATE, [0.0, 10.0], timestamp=time.monotonic())
+        control = ModelControl(store, _FarModel(), ModelControlConfig(grace_s=1.0))  # type: ignore[arg-type]
+        control.on_start()
+        control.on_tick()
+        # Starts where the follower is, not where the model points.
+        np.testing.assert_allclose(store.read(ACTION).value, [0.0, 10.0], atol=0.5)
+
+        control.started_at = time.monotonic() - 0.5  # halfway through
+        control.on_tick()
+        np.testing.assert_allclose(store.read(ACTION).value, [25.0, 30.0], atol=0.5)
+
+        control.started_at = time.monotonic() - 2.0  # past it: on the model's actions
+        control.on_tick()
+        np.testing.assert_allclose(store.read(ACTION).value, [50.0, 50.0])
+        control.on_stop()
+    finally:
+        store.unlink()

@@ -95,6 +95,9 @@ if TYPE_CHECKING:
 _RELOAD_S = 120.0
 """A backstop: each device has its own ready timeout."""
 
+_RELEASE_S = 10.0
+"""How long a load waits for a closing session to disconnect the devices it held."""
+
 _CONTROL = "control"
 """What the session reports a control as: a control is a thread in the session, not on the bus itself."""
 
@@ -132,6 +135,8 @@ class RuntimeSession:
         self.project_name = project_name
         self.started_at = datetime.datetime.now(tz=datetime.UTC)
         self.closed = asyncio.Event()
+        self.finished = asyncio.Event()
+        """Set once a closed session has let go of everything it held."""
         self._resolve = resolve
         self._registry = registry
         self._camera_claims = camera_claims
@@ -191,6 +196,7 @@ class RuntimeSession:
                 if self._bus is not None:
                     self._bus.close()
                 logger.info("Session {} closed ({})", self.id, reason)
+                self.finished.set()
 
     def _serve_commands(self, bus: Bus) -> None:
         """Serve the commands that change what the session holds; workers serve their own."""
@@ -208,7 +214,7 @@ class RuntimeSession:
             "unload_model": (UnloadModelCommand, lambda _command: self.unload_model()),
         }
         for name, (model, run) in commands.items():
-            bus.serve(command_key(name), model, _as_command(run))
+            bus.serve(command_key(name), model, _as_command(name, run))
 
     def _listen(self, bus: Bus) -> None:
         """Deal with what the parts report about themselves on the bus."""
@@ -387,6 +393,7 @@ class RuntimeSession:
     ) -> AsyncIterator[LoadedEnvironment]:
         """Claim and connect the environment for as long as it is loaded."""
         store = cast("Store", self._store)  # created before the environment is loaded
+        await self._registry.until_closed(within=_RELEASE_S)
         with self._claim(description):
             async with Environment(description, self.id, store) as held:
                 yield LoadedEnvironment(
@@ -641,14 +648,17 @@ def _model_mismatch(model: ProcessModel, spec: FeatureSpec) -> str | None:
     return None
 
 
-def _as_command(run: Callable[[Any], Awaitable[None]]) -> Callable[[Any], Awaitable[CommandDone]]:
+def _as_command(name: str, run: Callable[[Any], Awaitable[None]]) -> Callable[[Any], Awaitable[CommandDone]]:
     """A bus handler for a session command, failing with an error code its requester can show."""
 
     async def handle(command: Any) -> CommandDone:
         try:
             await run(command)
         except Exception as error:
-            raise _command_error(error) from error
+            refused = _command_error(error)
+            if refused.error_code != "internal_error":  # an internal error is logged with its traceback
+                logger.warning("Session command {} refused ({}): {}", name, refused.error_code, refused.message)
+            raise refused from error
         return CommandDone()
 
     return handle
@@ -661,7 +671,7 @@ _ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
 )
 
 
-def _command_error(error: Exception) -> Exception:
+def _command_error(error: Exception) -> AppBaseException:
     if isinstance(error, AppBaseException):
         return error
     if isinstance(error, WorkerStartupError):

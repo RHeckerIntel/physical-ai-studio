@@ -79,6 +79,12 @@ class ModelControlConfig(BaseModel):
     """What the model is asked to do, for a policy that takes a task."""
     hz: float = Field(30, gt=0, le=500, description="How often an action is taken from the model's queue")
     execution: ExecutionConfig = ExecutionConfig()
+    grace_s: float = Field(
+        3,
+        ge=0,
+        le=30,
+        description="On every start, the follower closes the gap to the model's actions over this long",
+    )
 
 
 ControlConfig = Annotated[
