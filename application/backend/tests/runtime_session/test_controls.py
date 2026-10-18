@@ -11,7 +11,12 @@ import pytest
 from runtime_session.controls import MoveControl, ReplayControl, TeleopControl, build_control
 from runtime_session.store import ACTION, STATE, FeatureSpec, Store
 from schemas.dataset import Episode
-from schemas.runtime_session import MoveControlConfig, ReplayControlConfig, TeleopControlConfig
+from schemas.runtime_session import (
+    MoveControlConfig,
+    ReplayControlConfig,
+    SetTeleopSlowdownCommand,
+    TeleopControlConfig,
+)
 from tests.workers.fake_robot import FakeRobot
 from workers.base import WorkerStartupError
 
@@ -69,6 +74,51 @@ async def test_every_start_of_teleop_has_its_own_grace_period(store: Store, tmp_
             await asyncio.sleep(0.05)
         # A fresh control blends from the follower again rather than jumping to the leader.
         assert store.read(ACTION).value[0] < 1.0
+
+
+def test_relative_teleop_slows_the_arm_down_from_where_it_is_and_leaves_the_gripper_absolute(
+    store: Store, tmp_path: Path
+) -> None:
+    leader = _leader(tmp_path)
+    control = TeleopControl(store, leader, TeleopControlConfig(slowdown=2.0))
+    control.on_start()
+    control.on_tick()
+    # The arm starts where the follower is; the gripper follows the leader.
+    assert store.read(ACTION).value.tolist() == [0.0, 6.0]
+
+    leader._position = np.array([7.0, 4.0])  # moved by [2, -2]
+    control.on_tick()
+    assert store.read(ACTION).value.tolist() == [1.0, 4.0]
+
+
+def test_switching_teleop_mode_moves_on_from_the_last_command(store: Store, tmp_path: Path) -> None:
+    leader = _leader(tmp_path)
+    control = TeleopControl(store, leader, TeleopControlConfig(grace_s=1.0))
+    control.on_start()
+    control.started_at = time.monotonic() - 2.0  # past the grace period: on the leader
+    control.on_tick()
+    assert store.read(ACTION).value.tolist() == [5.0, 6.0]
+
+    control.set_slowdown(SetTeleopSlowdownCommand(request_id="1", slowdown=2.0))
+    assert control.config.slowdown == 2.0
+    leader._position = np.array([7.0, 8.0])
+    control.on_tick()
+    assert store.read(ACTION).value.tolist() == [6.0, 8.0]  # the arm at half speed, the gripper absolute
+
+    control.set_slowdown(SetTeleopSlowdownCommand(request_id="2", slowdown=None))
+    control.on_tick()
+    # Back to absolute, closing the gap to the leader from the last command rather than jumping.
+    np.testing.assert_allclose(store.read(ACTION).value, [6.0, 8.0], atol=0.1)
+
+
+def test_relative_teleop_needs_the_followers_position(tmp_path: Path) -> None:
+    store = Store.create(FeatureSpec(JOINTS), uuid.uuid4().hex)
+    try:
+        control = TeleopControl(store, _leader(tmp_path), TeleopControlConfig(slowdown=2.0))
+        with pytest.raises(RuntimeError, match="follower's position"):
+            control.on_start()
+    finally:
+        store.unlink()
 
 
 def test_teleop_refuses_a_leader_with_other_joints(store: Store, tmp_path: Path) -> None:

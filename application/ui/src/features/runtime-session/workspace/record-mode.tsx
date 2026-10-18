@@ -5,7 +5,7 @@ import { Button, Flex, Form, Keyboard, Text, TextArea, toast } from '@geti-ui/ui
 import { $api } from '../../../api/client';
 import { formatKeyCombo, getEffectiveBindings } from '../../hotkeys/key-combo';
 import { useHotkey } from '../../hotkeys/use-hotkey';
-import { TeleopSwitch } from '../cells/robot-cell';
+import { RelativeTeleop, TeleopSwitch } from '../cells/robot-cell';
 import { ERROR_TOAST, failureOf, useRuntimeSession } from '../runtime-session-provider';
 
 import classes from './record-mode.module.css';
@@ -112,7 +112,12 @@ export const RecordMode = () => {
 
     return (
         <Flex direction='column' gap='size-200'>
-            {state?.environment?.leader_id != null && <TeleopSwitch />}
+            {state?.environment?.leader_id != null && (
+                <>
+                    <TeleopSwitch />
+                    <RelativeTeleop />
+                </>
+            )}
             <Form validationBehavior='native' onSubmit={onStart}>
                 <Flex direction='column' gap='size-150'>
                     <TextArea

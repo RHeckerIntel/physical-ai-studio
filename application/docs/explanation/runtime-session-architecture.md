@@ -123,7 +123,7 @@ A worker that dies is reported `failed` with its reason. Nothing retries silentl
 
 | Control | Writes | Grace move |
 |---|---|---|
-| `TeleopControl` | what the leader measures, at 100 Hz | over `grace_s` to the leader |
+| `TeleopControl` | what the leader measures, at 100 Hz; held relative, its movement slowed down, grippers absolute | over `grace_s` to the leader |
 | `MoveControl` | a straight line to a pose over `duration_s`, then holds | – (it is one) |
 | `ReplayControl` | an episode of the loaded dataset as it is on disk, at its fps, then holds the last frame | to the first frame, before playing |
 | `ModelControl` | the loaded model's executor's next action, at 30 Hz | over `grace_s` to the model's actions |
@@ -133,6 +133,7 @@ A worker that dies is reported `failed` with its reason. Nothing retries silentl
 - **No control means hold.** The robot worker seeds `action` with the measured position when it connects, and keeps sending `action` as it is.
 - **Every control that can start far from the follower eases in.** A leader, an episode's first frame or a model's rest pose can be anywhere. Without the grace move the follower is driven there at full speed: on an SO-101, an ACT policy commanding its rest pose swung the arm about 150° in one go. Teleop and the model blend from where the follower was to their target while they keep tracking it, so they are on it when the grace period ends. Replay moves to the first frame and only then starts the clock.
 - **`goal_time` is the only interpolation.** The robot worker sends each action with `goal_time = max(action.timestamp - previous tick, 1/hz)`. An action stamped in the future (a model's chunk at `t0 + i·dt`) is approached over that time, anything else as fast as one tick allows.
+- **What changes while a control runs is a command, not a new control.** Switching joins the old control before the next starts, so the follower is undriven for that moment, which shows in a recording. A control therefore serves its own commands on the session's bus while it runs (`Control.commands`), handled on its thread between ticks, and publishes its changed config on `evt/control` for the session to report. Teleop's `set_teleop_slowdown` switches between absolute and relative this way, moving on from the last command in the new mode.
 - **Controls borrow; they never connect.** A control gets references to what the session loaded (the leader, the model), so switching control, which happens all the time, never connects or disconnects a device. Some robots reset on disconnect.
 
 Combinations such as a human taking over from a policy get a control of their own when they are designed, rather than two controls fighting over `action`.

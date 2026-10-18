@@ -14,6 +14,7 @@ from schemas.runtime_session import ModelControlConfig, ReplayControlConfig, Tel
 if TYPE_CHECKING:
     from physicalai.robot import Robot
 
+    from runtime_session.bus import Bus
     from runtime_session.model import ProcessModel
     from runtime_session.store import Store
     from schemas.dataset import Episode
@@ -28,10 +29,12 @@ def build_control(
     leader: Robot | None,
     episode: Episode | None = None,
     model: ProcessModel | None = None,
+    bus: Bus | None = None,
 ) -> Control:
     """Raises ``ValueError`` when the session cannot run ``config``.
 
-    A replay needs its ``episode``, and a model control the loaded ``model``.
+    A replay needs its ``episode``, and a model control the loaded ``model``. A control
+    serves its own commands on ``bus``.
     """
     if isinstance(config, ModelControlConfig):
         if model is None:
@@ -44,5 +47,5 @@ def build_control(
     if isinstance(config, TeleopControlConfig):
         if leader is None:
             raise ValueError("Teleoperation needs a leader arm; this environment has none")
-        return TeleopControl(store, leader, config)
+        return TeleopControl(store, leader, config, bus)
     return MoveControl(store, config)

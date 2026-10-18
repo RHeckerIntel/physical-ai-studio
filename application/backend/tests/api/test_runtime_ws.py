@@ -206,7 +206,7 @@ def test_set_control_is_acked_and_reported_in_state(client: TestClient) -> None:
         assert socket.ack({"command": "load_environment", "environment": _draft()})["ok"]
         assert socket.ack({"command": "set_control", "control": {"type": "teleop", "hz": 50}})["ok"]
         state = socket.until_state(lambda data: data["control"] is not None)
-        assert state["control"] == {"type": "teleop", "hz": 50.0, "grace_s": 3.0}  # the default grace
+        assert state["control"] == {"type": "teleop", "hz": 50.0, "grace_s": 3.0, "slowdown": None}  # the defaults
 
         assert socket.ack({"command": "set_control", "control": None})["ok"]
         assert socket.until_state(lambda data: data["control"] is None)["control"] is None

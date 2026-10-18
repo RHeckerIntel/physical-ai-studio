@@ -29,6 +29,7 @@ import {
     SchemaSaveEpisodeCommand,
     SchemaSessionState,
     SchemaSetControlCommand,
+    SchemaSetTeleopSlowdownCommand,
     SchemaStartEpisodeCommand,
     SchemaStateMessage,
     SchemaStatusMessage,
@@ -50,6 +51,7 @@ type Command =
     | Omit<SchemaUnloadEnvironmentCommand, 'request_id'>
     | Omit<SchemaReloadEnvironmentCommand, 'request_id'>
     | Omit<SchemaSetControlCommand, 'request_id'>
+    | Omit<SchemaSetTeleopSlowdownCommand, 'request_id'>
     | Omit<SchemaLoadDatasetCommand, 'request_id'>
     | Omit<SchemaUnloadDatasetCommand, 'request_id'>
     | Omit<SchemaLoadModelCommand, 'request_id'>

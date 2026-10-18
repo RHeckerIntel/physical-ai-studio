@@ -39,6 +39,12 @@ class TeleopControlConfig(BaseModel):
         le=30,
         description="On every start, the follower closes the gap to the leader over this long instead of jumping",
     )
+    slowdown: float | None = Field(
+        None,
+        ge=1,
+        le=10,
+        description="Relative mode: the follower moves by the leader's movement since the start, divided by this",
+    )
 
 
 class MoveControlConfig(BaseModel):
@@ -166,6 +172,17 @@ class DiscardEpisodeCommand(BaseModel):
     request_id: str
 
 
+class SetTeleopSlowdownCommand(BaseModel):
+    """While teleoperating, switch to relative teleop slowed down by ``slowdown``, or back to absolute with ``null``.
+
+    The control keeps running, so the follower is driven throughout the switch.
+    """
+
+    command: Literal["set_teleop_slowdown"] = "set_teleop_slowdown"
+    request_id: str
+    slowdown: float | None = Field(None, ge=1, le=10)
+
+
 class SetControlCommand(BaseModel):
     """Switch what drives the follower. ``null`` holds it where it is."""
 
@@ -179,6 +196,7 @@ RuntimeSessionCommand = Annotated[
     | UnloadEnvironmentCommand
     | ReloadEnvironmentCommand
     | SetControlCommand
+    | SetTeleopSlowdownCommand
     | LoadDatasetCommand
     | UnloadDatasetCommand
     | LoadModelCommand

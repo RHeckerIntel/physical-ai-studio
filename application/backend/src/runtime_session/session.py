@@ -14,8 +14,9 @@ control driving the follower, and the dataset being recorded (see
 what is about the session itself: its claims on the devices, and deciding what
 a part's failure means for the others. The parts report their status on
 ``evt/status/<part>`` themselves, and the session listens (see ``_listen``);
-it reports a control's for it, as a control is a thread without a bus of its
-own. The socket forwards all of them.
+it reports a control's for it, as a control is a thread in this process; a
+control serves its own commands on the session's bus while it runs. The socket
+forwards all of them.
 
 See the "RuntimeSession API" section of docs/feature_plans/runtime-inhousing-plan.md.
 """
@@ -39,6 +40,7 @@ from exceptions import IncompatiblePartsError, RuntimeSessionCommandError
 from internal_datasets.utils import get_internal_read_dataset
 from runtime_session.bus import EVENTS, Bus, BusRequestError, command_key, publish_status, status_key
 from runtime_session.controls import build_control
+from runtime_session.controls.base import CHANGED as CONTROL_CHANGED
 from runtime_session.dataset import COMPONENT as DATASET
 from runtime_session.dataset import Recording, dataset_spec
 from runtime_session.environment import COMPONENT as ENVIRONMENT
@@ -220,6 +222,8 @@ class RuntimeSession:
         """Deal with what the parts report about themselves on the bus."""
         bus.listen(status_key(ENVIRONMENT), StatusMessage, self._on_environment)
         bus.listen(status_key(_CONTROL), StatusMessage, self._on_control)
+        # A control changed what it does through one of its commands; it already holds the new config.
+        bus.listen(CONTROL_CHANGED, dict, lambda _config: self._emit(StateMessage(data=self.state())))
         bus.listen(status_key(DATASET), StatusMessage, self._on_dataset)
         bus.listen(status_key(MODEL), StatusMessage, self._on_model)
         bus.listen(dataset_rpc.EVENTS, RecordingStatus, self._on_recording)
@@ -462,7 +466,7 @@ class RuntimeSession:
     @asynccontextmanager
     async def _watched_control(self, config: ControlConfig, environment: Environment) -> AsyncIterator[Control]:
         episode = await self._episode(config.episode_index) if isinstance(config, ReplayControlConfig) else None
-        control = build_control(config, environment.store, environment.leader, episode, self._model.value)
+        control = build_control(config, environment.store, environment.leader, episode, self._model.value, self.bus)
         async with self._reported(_CONTROL, control):
             yield control
 
