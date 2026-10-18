@@ -493,6 +493,12 @@ The record and inference pages become one session workspace: the dock (the follo
    - Check that `physicalai.runtime` is only imported by `services/runtime_export.py` and `ModelControl`.
    - Rewrite `docs/explanation/runtime-session-architecture.md`.
    - Do a full manual pass on real hardware: preview, teleop, record + save/discard, inference, replay.
+   - Done: only `ModelControl` imports `physicalai.runtime`; `services/runtime_export.py` names its classes as class paths.
+   - Done: `docs/explanation/runtime-session-architecture.md` describes the session as built.
+   - Done, over the session websocket on an SO-101: preview, reload, teleop, record with save and discard, replay of an episode recorded in the same session, and ACT inference (torch, CUDA) in sync and async. It found two things, fixed in the improvements PR:
+     - `ModelControl` had no grace move, so a model commanding its rest pose swung the arm about 150° at once.
+     - A page that opens a session lost the race for the devices with the session it had just closed.
+   - Done: a pass through the UI in a browser.
 10. **Merge** the feature branch into `main`.
 
 ## Decisions
