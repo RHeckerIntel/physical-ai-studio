@@ -20,12 +20,12 @@ if TYPE_CHECKING:
 
 
 class TeleopControl(Control):
-    """Command the follower whatever the leader measures, stamped with the leader's capture time.
+    """Command the follower whatever the leader measures, due by the leader's next reading.
 
     The leader can be anywhere when teleop starts, so for the first ``grace_s``
-    the command blends from where the follower was to where the leader is now,
-    rather than jumping there. It tracks the leader the whole time, so the
-    follower is on it when the grace period ends.
+    each command is stamped due at the end of the grace period: the robot worker
+    closes the gap over it rather than jumping. It tracks the leader the whole
+    time, so the follower is on it when the grace period ends.
 
     With ``slowdown`` set it is relative instead: the follower moves by how
     far the leader moved since the start, divided by ``slowdown``. It
@@ -53,7 +53,7 @@ class TeleopControl(Control):
         self.started_at = 0.0
 
     def on_start(self) -> None:
-        """Remember where the follower is, so the grace period blends from there."""
+        """Remember where the follower is, so relative teleop moves from there."""
         self._anchor(self.store.read(STATE))
 
     def commands(self) -> Commands:
@@ -68,7 +68,6 @@ class TeleopControl(Control):
 
     def _anchor(self, follower: Sample | None) -> None:
         """Start the grace period, or relative teleop, from ``follower`` and the leader as they are now."""
-        # Without a measured follower there is nothing to blend from; follow the leader directly.
         self.start_position = follower.value if follower is not None else None
         self.started_at = time.monotonic()
         self.leader_start = None
@@ -80,10 +79,10 @@ class TeleopControl(Control):
     def on_tick(self) -> None:
         observation = self.leader.get_observation()
         target = observation.joint_positions
-        elapsed = observation.timestamp - self.started_at
+        due = observation.timestamp + 1 / self.hz
         if self.leader_start is not None and self.start_position is not None:
             relative = self.start_position + (target - self.leader_start) / self.slowdown
             target = np.where(self.relative, relative, target)
-        elif self.start_position is not None and elapsed < self.grace_s:
-            target = self.start_position + (target - self.start_position) * (elapsed / self.grace_s)
-        self.store.write(ACTION, target, timestamp=observation.timestamp)
+        else:
+            due = max(due, self.started_at + self.grace_s)
+        self.store.write(ACTION, target, timestamp=due)

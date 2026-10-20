@@ -69,14 +69,19 @@ async def test_holds_still_then_follows_the_action(log: Path, store: Store) -> N
         await _until(lambda: len(sent_actions(log)) >= 2)
         assert sent_actions(log)[0] == {"action": [1.0, 2.0], "goal_time": pytest.approx(1 / HZ)}
 
-        store.write(ACTION, [5.0, 6.0], timestamp=time.monotonic() + 0.5)
+        before = len(sent_actions(log))
+        sent_at = time.monotonic()
+        store.write(ACTION, [5.0, 6.0], timestamp=sent_at + 0.5)
         await _until(lambda: sent_actions(log)[-1]["action"] == [5.0, 6.0])
+        arrived_after = time.monotonic() - sent_at
         await _until(lambda: store.read(STATE).value.tolist() == [5.0, 6.0])
-        await asyncio.sleep(0.6)  # past the action's stamp
-    future = next(sent for sent in sent_actions(log) if sent["action"] == [5.0, 6.0])
-    assert 0.4 < future["goal_time"] <= 0.5 + 1 / HZ  # measured from the previous tick
-    # Once the stamp is in the past, the floor applies again.
-    assert sent_actions(log)[-1]["goal_time"] == pytest.approx(1 / HZ)
+    approach = [sent["action"][0] for sent in sent_actions(log)[before:]]
+    # A future action is stepped towards, never past, and reached around its stamp rather than at once.
+    assert len({round(value, 6) for value in approach}) > 10
+    assert approach == sorted(approach)
+    assert max(approach) == 5.0
+    assert 0.4 < arrived_after < 1.0
+    assert all(sent["goal_time"] == pytest.approx(1 / HZ) for sent in sent_actions(log))
 
 
 async def test_a_robot_with_other_joints_fails_to_start(log: Path) -> None:

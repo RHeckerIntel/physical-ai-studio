@@ -47,33 +47,30 @@ def test_teleop_commands_what_the_leader_measures(store: Store, tmp_path: Path) 
     control.on_tick()
     action = store.read(ACTION)
     assert action.value.tolist() == [5.0, 6.0]
-    assert action.timestamp <= time.monotonic()
+    assert action.timestamp <= time.monotonic() + 1 / control.hz  # due by the next reading
 
 
-def test_teleop_closes_the_gap_to_the_leader_over_the_grace_period(store: Store, tmp_path: Path) -> None:
+def test_teleop_commands_the_leader_due_at_the_end_of_the_grace_period(store: Store, tmp_path: Path) -> None:
     control = TeleopControl(store, _leader(tmp_path), TeleopControlConfig(grace_s=1.0))
     control.on_start()
     control.on_tick()
-    # Starts where the follower is, not where the leader is.
-    np.testing.assert_allclose(store.read(ACTION).value, [0.0, 10.0], atol=0.1)
+    # The leader's position, due once the grace period is over: the robot worker closes the gap over it.
+    action = store.read(ACTION)
+    assert action.value.tolist() == [5.0, 6.0]
+    assert action.timestamp == pytest.approx(control.started_at + 1.0)
 
-    control.started_at = time.monotonic() - 0.5  # halfway through
+    control.started_at = time.monotonic() - 2.0  # past it: due one reading from now
     control.on_tick()
-    np.testing.assert_allclose(store.read(ACTION).value, [2.5, 8.0], atol=0.1)
-
-    control.started_at = time.monotonic() - 2.0  # past it: on the leader
-    control.on_tick()
-    assert store.read(ACTION).value.tolist() == [5.0, 6.0]
+    assert store.read(ACTION).timestamp == pytest.approx(time.monotonic() + 1 / control.hz, abs=0.01)
 
 
 async def test_every_start_of_teleop_has_its_own_grace_period(store: Store, tmp_path: Path) -> None:
     leader = _leader(tmp_path)
     for _ in range(2):
-        store.write(STATE, [0.0, 10.0], timestamp=time.monotonic())
         async with TeleopControl(store, leader, TeleopControlConfig(grace_s=5.0)):
             await asyncio.sleep(0.05)
-        # A fresh control blends from the follower again rather than jumping to the leader.
-        assert store.read(ACTION).value[0] < 1.0
+        # A fresh control is due at the end of its own grace period again.
+        assert store.read(ACTION).timestamp > time.monotonic() + 4.0
 
 
 def test_relative_teleop_slows_the_arm_down_from_where_it_is_and_leaves_the_gripper_absolute(
@@ -107,8 +104,10 @@ def test_switching_teleop_mode_moves_on_from_the_last_command(store: Store, tmp_
 
     control.set_slowdown(SetTeleopSlowdownCommand(request_id="2", slowdown=None))
     control.on_tick()
-    # Back to absolute, closing the gap to the leader from the last command rather than jumping.
-    np.testing.assert_allclose(store.read(ACTION).value, [6.0, 8.0], atol=0.1)
+    # Back to absolute, the leader due a grace period from now rather than at once.
+    action = store.read(ACTION)
+    assert action.value.tolist() == [7.0, 8.0]
+    assert action.timestamp > time.monotonic() + 0.9
 
 
 def test_relative_teleop_needs_the_followers_position(tmp_path: Path) -> None:
@@ -177,9 +176,11 @@ def test_replay_moves_to_the_first_frame_then_plays_at_the_recorded_rate(store: 
         store, _episode([[4.0, 0.0], [5.0, 1.0], [6.0, 2.0]]), ReplayControlConfig(episode_index=0, grace_s=1.0)
     )
     control.on_start()
-    control.started_at = time.monotonic() - 0.5  # halfway to the first frame
     control.on_tick()
-    np.testing.assert_allclose(store.read(ACTION).value, [2.0, 5.0], atol=0.1)
+    # The first frame, due once the grace period is over: the robot worker closes the gap over it.
+    action = store.read(ACTION)
+    assert action.value.tolist() == [4.0, 0.0]
+    assert action.timestamp == pytest.approx(control.started_at + 1.0)
 
     control.started_at = time.monotonic() - 1.15  # 0.15 s into the episode, at 10 fps: frame 1
     control.on_tick()

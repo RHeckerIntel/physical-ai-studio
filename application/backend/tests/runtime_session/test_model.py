@@ -137,23 +137,21 @@ class _FarModel:
         pass
 
 
-def test_the_model_closes_the_gap_to_its_actions_over_the_grace_period() -> None:
+def test_the_models_actions_are_due_at_the_end_of_the_grace_period() -> None:
     store = Store.create(FeatureSpec(("shoulder_pan.pos", "gripper.pos")), uuid4().hex)
     try:
         store.write(STATE, [0.0, 10.0], timestamp=time.monotonic())
         control = ModelControl(store, _FarModel(), ModelControlConfig(grace_s=1.0))  # type: ignore[arg-type]
         control.on_start()
         control.on_tick()
-        # Starts where the follower is, not where the model points.
-        np.testing.assert_allclose(store.read(ACTION).value, [0.0, 10.0], atol=0.5)
+        # The model's action, due once the grace period is over: the robot worker closes the gap over it.
+        action = store.read(ACTION)
+        np.testing.assert_allclose(action.value, [50.0, 50.0])
+        assert action.timestamp == pytest.approx(control.started_at + 1.0)
 
-        control.started_at = time.monotonic() - 0.5  # halfway through
+        control.started_at = time.monotonic() - 2.0  # past it: due one tick from now
         control.on_tick()
-        np.testing.assert_allclose(store.read(ACTION).value, [25.0, 30.0], atol=0.5)
-
-        control.started_at = time.monotonic() - 2.0  # past it: on the model's actions
-        control.on_tick()
-        np.testing.assert_allclose(store.read(ACTION).value, [50.0, 50.0])
+        assert store.read(ACTION).timestamp == pytest.approx(time.monotonic() + 1 / control.hz, abs=0.01)
         control.on_stop()
     finally:
         store.unlink()
