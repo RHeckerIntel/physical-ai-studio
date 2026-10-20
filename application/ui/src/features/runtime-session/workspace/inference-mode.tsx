@@ -29,13 +29,15 @@ const useDefaultTask = (model_id: string | undefined) => {
     return dataset?.default_task ?? '';
 };
 
-/** Inference mode's side bar: the task and how chunks are requested, then play / stop. */
+/** Inference mode's side bar: the task, the action rate and how chunks are requested, then play / stop. */
 export const InferenceMode = () => {
     const { state, statuses, send } = useRuntimeSession();
     const defaultTask = useDefaultTask(state?.model?.model_id);
     const [task, setTask] = useState(defaultTask);
     const [mode, setMode] = useState<SchemaExecutionConfig['mode']>('sync');
     const [threshold, setThreshold] = useState(0.5);
+    // shortcut: set by hand, upgrade to the model's training fps once exports record it.
+    const [hz, setHz] = useState(30);
     const [isPending, setIsPending] = useState(false);
 
     useEffect(() => setTask(defaultTask), [defaultTask]);
@@ -63,7 +65,7 @@ export const InferenceMode = () => {
         void setControl({
             type: 'model',
             task,
-            hz: 30,
+            hz,
             execution: { mode, request_threshold: threshold },
             // The follower eases onto the model's actions, which may start far from where it is.
             grace_s: 3,
@@ -82,6 +84,17 @@ export const InferenceMode = () => {
             >
                 {(item) => <Item key={item.key}>{item.label}</Item>}
             </Picker>
+            <Slider
+                label='Action rate'
+                width='100%'
+                minValue={5}
+                maxValue={100}
+                step={5}
+                value={hz}
+                onChange={setHz}
+                getValueLabel={(value) => `${value} Hz`}
+                isDisabled={isRunning}
+            />
             <Slider
                 label='Request the next chunk at'
                 width='100%'

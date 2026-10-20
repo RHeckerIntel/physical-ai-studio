@@ -3,10 +3,10 @@
 The worker does not know what writes ``action``; a leader arm, a policy or a
 move to a home position all look the same from here. On connect it seeds
 ``action`` with the measured position, so with nothing driving it the arm holds
-still. Each tick it sends the latest action with
-``goal_time = max(action.timestamp - previous tick, 1/hz)``: an action stamped
-in the future (a model's chunk) is approached over that time, anything else as
-fast as one tick allows. There is no interpolation.
+still. An action stamped in the future is approached linearly: each tick moves
+the last command ``1/hz / time left`` of the way to the action, so it arrives at
+the stamp. Anything stamped within a tick is sent as is. The worker interpolates
+because drivers may ignore ``goal_time`` (SO-101 does).
 
 Any exception ends the worker. Nothing retries silently.
 """
@@ -163,17 +163,17 @@ class RobotWorker(ProcessWorker["Robot"]):
 
     async def _drive(self, context: Robot) -> None:
         rate = Rate(self.hz, name=self.name)
-        min_goal_time = 1.0 / self.hz
-        previous_tick: float | None = None
+        tick = 1.0 / self.hz
+        command = None  # the last one sent, not measured: measuring would feed tracking lag back in
         while not self.should_stop():
             observation = context.get_observation()
             self._store.write(STATE, observation.joint_positions, timestamp=observation.timestamp)
             action = None if self.observe_only else self._store.read(ACTION)
             if action is not None:
-                goal_time = min_goal_time
-                if previous_tick is not None:
-                    goal_time = max(action.timestamp - previous_tick, min_goal_time)
-                context.send_action(action.value, goal_time=goal_time)
-            previous_tick = time.monotonic()
+                if command is None:
+                    command = observation.joint_positions
+                remaining = action.timestamp - time.monotonic()
+                command = command + (action.value - command) * (tick / remaining) if remaining > tick else action.value
+                context.send_action(command, goal_time=tick)
             await rate.sleep()
         logger.info("Robot worker {} stopped", self.name)
