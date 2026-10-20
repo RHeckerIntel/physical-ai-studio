@@ -79,6 +79,7 @@ def test_a_new_dataset_has_no_shape_and_the_default_rate() -> None:
     dataset = _dataset()
     assert dataset_spec(dataset) is None
     assert dataset_fps(dataset) == DEFAULT_RECORDING_FPS
+    assert dataset_fps(dataset, 60) == 60  # a new dataset takes the rate asked for
 
 
 def test_a_recorded_dataset_reads_its_joints_cameras_and_rate() -> None:
@@ -89,6 +90,16 @@ def test_a_recorded_dataset_reads_its_joints_cameras_and_rate() -> None:
     assert spec.joint_names == ("shoulder_pan.pos", "gripper.pos")
     assert spec.observations == {"cam 0": ImageSpec(120, 160, 3)}
     assert dataset_fps(dataset) == 10
+    assert dataset_fps(dataset, 60) == 10  # a recorded one keeps its own
+
+
+async def test_a_new_dataset_records_at_the_rate_it_is_loaded_with(new_session, fake_cameras, fake_worker) -> None:
+    session = await new_session()
+    await session.load_environment(make_environment())
+    await session.load_dataset(_dataset(), fps=60)
+    assert session.state().dataset.fps == 60
+    assert not session.state().dataset.fps_fixed
+    await session.stop()
 
 
 async def test_record_save_and_discard_episodes(new_session, fake_cameras, fake_worker) -> None:

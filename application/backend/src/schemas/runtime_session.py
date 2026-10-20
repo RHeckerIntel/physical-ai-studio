@@ -147,6 +147,9 @@ class LoadDatasetCommand(BaseModel):
     command: Literal["load_dataset"] = "load_dataset"
     request_id: str
     dataset_id: UUID
+    fps: int | None = Field(
+        None, ge=1, le=100, description="The rate to record a dataset with nothing recorded at; others keep their own"
+    )
 
 
 class UnloadDatasetCommand(BaseModel):
@@ -252,6 +255,8 @@ class SessionDataset(BaseModel):
     dataset_id: UUID
     name: str
     fps: int
+    fps_fixed: bool
+    """Whether the dataset already has episodes, and so its own rate; a new one takes the rate it is loaded with."""
     is_recording: bool
     episodes_recorded: int
     """Saved in this session and not yet copied into the dataset, which happens when it is unloaded."""

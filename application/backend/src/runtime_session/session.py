@@ -210,7 +210,10 @@ class RuntimeSession:
             "unload_environment": (UnloadEnvironmentCommand, lambda _command: self.unload_environment()),
             "reload_environment": (ReloadEnvironmentCommand, lambda _command: self.reload_environment()),
             "set_control": (SetControlCommand, lambda command: self.set_control(command.control)),
-            "load_dataset": (LoadDatasetCommand, lambda command: self._load_dataset_by_id(command.dataset_id)),
+            "load_dataset": (
+                LoadDatasetCommand,
+                lambda command: self._load_dataset_by_id(command.dataset_id, command.fps),
+            ),
             "unload_dataset": (UnloadDatasetCommand, lambda _command: self.unload_dataset()),
             "load_model": (LoadModelCommand, self._load_model_command),
             "unload_model": (UnloadModelCommand, lambda _command: self.unload_model()),
@@ -231,8 +234,8 @@ class RuntimeSession:
     async def _load_draft(self, draft: EnvironmentDraft, *, unload_incompatible: bool) -> None:
         await self.load_environment(await self._resolve.environment(draft), unload_incompatible=unload_incompatible)
 
-    async def _load_dataset_by_id(self, dataset_id: UUID) -> None:
-        await self.load_dataset(await self._resolve.dataset(dataset_id))
+    async def _load_dataset_by_id(self, dataset_id: UUID, fps: int | None) -> None:
+        await self.load_dataset(await self._resolve.dataset(dataset_id), fps)
 
     async def _load_model_command(self, command: LoadModelCommand) -> None:
         await self.load_model(await self._resolve.model(command.model_id), command.backend, command.device)
@@ -317,6 +320,7 @@ class RuntimeSession:
             dataset = self._dataset.value
             # A new store needs the dataset loaded again on it.
             keep = dataset.dataset if dataset is not None and not reuse_store else None
+            keep_fps = dataset.fps if dataset is not None else None
             model = self._model.value
             # Like the dataset, a model reads the store, so it is loaded again on a new one.
             keep_model = model if model is not None and not reuse_store else None
@@ -342,7 +346,7 @@ class RuntimeSession:
             finally:
                 # Also when the load was refused: the dataset records from the store, which is there either way.
                 if keep is not None:
-                    await self._reload_dataset(keep, environment.robots[0].robot.type)
+                    await self._reload_dataset(keep, environment.robots[0].robot.type, keep_fps)
                 if keep_model is not None:
                     await self._reload_model(keep_model)
                 self._emit(StateMessage(data=self.state()))
@@ -361,10 +365,10 @@ class RuntimeSession:
             recorded = self.store.spec
         return spec.check_compatible(recorded) if recorded is not None else []
 
-    async def _reload_dataset(self, dataset: Dataset, robot_type: str) -> None:
-        """Hold the lock. Load ``dataset`` again on a new store; a failure is reported, not raised."""
+    async def _reload_dataset(self, dataset: Dataset, robot_type: str, fps: int | None) -> None:
+        """Hold the lock. Load ``dataset`` again on a new store at its rate; a failure is reported, not raised."""
         try:
-            await self._dataset.load(self._recording(dataset, robot_type))
+            await self._dataset.load(self._recording(dataset, robot_type, fps))
         except Exception as error:
             logger.opt(exception=error).error("Session {} could not load dataset {!r} again", self.id, dataset.name)
             self._emit(
@@ -507,8 +511,8 @@ class RuntimeSession:
             logger.info("Session {} unloaded environment {!r}", self.id, environment.name)
         self._emit(StateMessage(data=self.state()))
 
-    async def load_dataset(self, dataset: Dataset) -> None:
-        """Start recording into ``dataset`` from the environment's store.
+    async def load_dataset(self, dataset: Dataset, fps: int | None = None) -> None:
+        """Start recording into ``dataset`` from the environment's store, at ``fps`` if it has nothing recorded yet.
 
         Raises:
             RuntimeSessionCommandError: No environment is loaded.
@@ -519,13 +523,13 @@ class RuntimeSession:
             environment = self._environment.require("Load an environment first.")
             # Swapping: the loaded one is finished (copied back) first.
             await self._dataset.unload()
-            await self._dataset.load(self._recording(dataset, environment.robot_type))
+            await self._dataset.load(self._recording(dataset, environment.robot_type, fps))
             logger.info("Session {} records into dataset {!r}", self.id, dataset.name)
         self._emit(StateMessage(data=self.state()))
 
-    def _recording(self, dataset: Dataset, robot_type: str) -> Recording:
+    def _recording(self, dataset: Dataset, robot_type: str, fps: int | None) -> Recording:
         # The store is there with any environment, even one that failed to connect.
-        return Recording(dataset, self.id, cast("Store", self._store), robot_type)
+        return Recording(dataset, self.id, cast("Store", self._store), robot_type, fps)
 
     async def load_model(self, model: Model, backend: str, device: str) -> None:
         """Load one of ``model``'s exports in its own process, replacing a loaded model.

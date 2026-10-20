@@ -46,10 +46,12 @@ def _info(dataset: Dataset) -> dict[str, Any] | None:
     return json.loads(info.read_text()) if info.is_file() else None
 
 
-def dataset_fps(dataset: Dataset) -> int:
-    """The rate the dataset was recorded at, or the default for a new one."""
+def dataset_fps(dataset: Dataset, requested: int | None = None) -> int:
+    """The rate the dataset was recorded at; a new one is recorded at ``requested``, or the default."""
     info = _info(dataset)
-    return int(info["fps"]) if info is not None else DEFAULT_RECORDING_FPS
+    if info is not None:
+        return int(info["fps"])
+    return requested or DEFAULT_RECORDING_FPS
 
 
 def dataset_spec(dataset: Dataset) -> FeatureSpec | None:
@@ -107,9 +109,12 @@ class Recording:
     but did not copy back is lost.
     """
 
-    def __init__(self, dataset: Dataset, session_id: str, store: Store, robot_type: str) -> None:
+    def __init__(
+        self, dataset: Dataset, session_id: str, store: Store, robot_type: str, fps: int | None = None
+    ) -> None:
         self.dataset = dataset
-        self.fps = dataset_fps(dataset)
+        self.fps = dataset_fps(dataset, fps)
+        self.fps_fixed = _info(dataset) is not None
         self.status = RecordingStatus(is_recording=False, episodes_recorded=0)
         """What the worker last announced on ``evt/dataset``; the worker owns it, the session keeps this up to date."""
         self._worker = DatasetWorker(
@@ -125,6 +130,7 @@ class Recording:
             dataset_id=self.dataset.id,
             name=self.dataset.name,
             fps=self.fps,
+            fps_fixed=self.fps_fixed,
             is_recording=self.status.is_recording,
             episodes_recorded=self.status.episodes_recorded,
         )

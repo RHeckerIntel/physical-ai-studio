@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useState } from 'react';
 
-import { Button, Flex, Form, Keyboard, Text, TextArea, toast } from '@geti-ui/ui';
+import { Button, Flex, Form, Keyboard, Slider, Text, TextArea, toast } from '@geti-ui/ui';
 
 import { $api } from '../../../api/client';
+import { SchemaSessionDataset } from '../../../api/openapi-spec';
 import { formatKeyCombo, getEffectiveBindings } from '../../hotkeys/key-combo';
 import { useHotkey } from '../../hotkeys/use-hotkey';
 import { RelativeTeleop, TeleopSwitch } from '../cells/robot-cell';
@@ -74,6 +75,37 @@ const useDefaultTask = (dataset_id: string | undefined) => {
     return data?.default_task ?? '';
 };
 
+/** The rate a dataset with nothing recorded yet is recorded at; changing it loads the dataset again at that rate. */
+const RecordingRate = ({ dataset }: { dataset: SchemaSessionDataset }) => {
+    const [fps, setFps] = useState(dataset.fps);
+    const { run, isPending } = useRecordingCommand();
+
+    useEffect(() => setFps(dataset.fps), [dataset.fps]);
+
+    // Once it has episodes, here or on disk, the dataset has its own rate.
+    const isFixed = dataset.fps_fixed || dataset.episodes_recorded > 0 || dataset.is_recording;
+    const reload = (value: number) => {
+        if (value !== dataset.fps) {
+            void run({ command: 'load_dataset', dataset_id: dataset.dataset_id, fps: value });
+        }
+    };
+
+    return (
+        <Slider
+            label='Recording rate'
+            value={fps}
+            onChange={setFps}
+            onChangeEnd={reload}
+            minValue={10}
+            maxValue={100}
+            step={5}
+            getValueLabel={(value) => `${value} fps`}
+            isDisabled={isFixed || isPending}
+            width='100%'
+        />
+    );
+};
+
 /** Record mode's side bar: teleoperation, the task, and start / accept / discard with their hotkeys. */
 export const RecordMode = () => {
     const { state, statuses } = useRuntimeSession();
@@ -130,6 +162,7 @@ export const RecordMode = () => {
                         value={task}
                         onChange={setTask}
                     />
+                    {dataset !== undefined && <RecordingRate dataset={dataset} />}
                     {isRecording && <RecordingStatus />}
                     {isRecording ? (
                         <Flex gap='size-100'>
