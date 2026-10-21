@@ -23,9 +23,9 @@ from lerobot.motors.feetech.feetech import FeetechMotorsBus
 from lerobot.motors.motors_bus import Motor, MotorCalibration, MotorNormMode
 from loguru import logger
 from physicalai.robot import device_id_from_serial_port
+from physicalai_so101_plugin.studio_catalog import find_so101_port
 
 from exceptions import RobotDeviceAlreadyOwnedError
-from robots.catalog.so101 import find_so101_port
 from schemas import SerialPortInfo
 from utils.serial_robot_tools import RobotConnectionManager
 from workers.robot_worker import claim_devices
