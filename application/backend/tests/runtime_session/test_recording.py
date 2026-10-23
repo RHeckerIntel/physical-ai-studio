@@ -143,6 +143,77 @@ async def test_record_save_and_discard_episodes(new_session, fake_cameras, fake_
     ]
 
 
+async def test_a_too_short_episode_is_discarded_not_saved(new_session, fake_cameras, fake_worker) -> None:
+    dataset = _dataset()
+    session = await new_session()
+    await session.load_environment(make_environment())
+    await session.load_dataset(dataset)
+    await _start(session, "pick")
+    with pytest.raises(BusRequestError, match="too short") as error:
+        await _save(session)  # at once: at most one frame in
+    assert error.value.error_code == "episode_too_short"
+    await _until(lambda: not session.state().dataset.is_recording)
+    assert session.state().dataset.episodes_recorded == 0
+    assert [event["event"] for event in recording_log(Path(dataset.path) / "recording.jsonl")] in (
+        ["discard"],
+        ["first_frame", "discard"],
+    )
+
+
+async def test_a_failed_save_clears_the_episode_so_the_next_records(new_session, fake_cameras, fake_worker) -> None:
+    dataset = _dataset()
+    fail = Path(dataset.path) / "fail_save"
+    fail.touch()
+    session = await new_session()
+    await session.load_environment(make_environment())
+    await session.load_dataset(dataset)
+    await _start(session, "pick")
+    await asyncio.sleep(0.2)
+    with pytest.raises(BusRequestError, match="disk is full"):
+        await _save(session)
+    fail.unlink()
+    await _start(session, "pick")
+    await asyncio.sleep(0.2)
+    assert (await _save(session)).episodes_recorded == 1
+    events = [event["event"] for event in recording_log(Path(dataset.path) / "recording.jsonl")]
+    assert events[:2] == ["first_frame", "discard"]
+    assert "save" in events
+
+
+async def test_a_frame_that_fails_to_record_loses_its_episode_not_the_recording(
+    new_session, fake_cameras, fake_worker
+) -> None:
+    dataset = _dataset()
+    log, fail = Path(dataset.path) / "recording.jsonl", Path(dataset.path) / "fail_frame"
+    session = await new_session()
+    await session.load_environment(make_environment())
+    await session.load_dataset(dataset)
+    fail.touch()
+    await _start(session, "pick")
+    await _until(lambda: "discard" in [event["event"] for event in recording_log(log)])
+    await _until(lambda: not session.state().dataset.is_recording)
+    fail.unlink()
+    await _start(session, "pick")
+    await asyncio.sleep(0.2)
+    assert (await _save(session)).episodes_recorded == 1
+    await session.unload_dataset()
+    assert recording_log(log)[-1]["event"] == "teardown"
+
+
+async def test_closing_finalizes_even_when_the_open_episode_cannot_be_discarded(
+    new_session, fake_cameras, fake_worker
+) -> None:
+    dataset = _dataset()
+    session = await new_session()
+    await session.load_environment(make_environment())
+    await session.load_dataset(dataset)
+    await _start(session, "pick")
+    await asyncio.sleep(0.2)
+    (Path(dataset.path) / "fail_discard").touch()
+    await session.unload_dataset()
+    assert recording_log(Path(dataset.path) / "recording.jsonl")[-1]["event"] == "teardown"
+
+
 async def test_unloading_the_environment_keeps_the_dataset_until_the_session_closes(
     new_session, fake_cameras, fake_worker
 ) -> None:
@@ -259,6 +330,7 @@ async def test_episodes_recorded_this_session_give_a_new_dataset_its_shape(
     await session.load_environment(make_environment())
     await session.load_dataset(_dataset())
     await _start(session, "pick")
+    await asyncio.sleep(0.2)
     await _save(session)
     await _until(lambda: session.state().dataset.episodes_recorded == 1)
     # Nothing is on disk yet, but the saved episode has this environment's camera.
