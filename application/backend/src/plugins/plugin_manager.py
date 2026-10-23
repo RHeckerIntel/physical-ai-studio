@@ -94,9 +94,12 @@ class PluginManager:
             entry = self._resolve(plugin_id)
             if self._installed_dist(plugin_id) is not None:
                 raise PluginOperationError(f"Plugin '{plugin_id}' is already installed.")
+            # --no-sources: a local-path plugin may live in a uv workspace whose
+            # [tool.uv.sources] pins (e.g. physicalai@<git rev>) would otherwise
+            # replace the Studio environment's own versions.
             await asyncio.to_thread(
                 self._run,
-                ["uv", "pip", "install", "--python", sys.executable, entry.install_source],
+                ["uv", "pip", "install", "--no-sources", "--python", sys.executable, entry.install_source],
             )
 
     async def uninstall(self, plugin_id: str) -> None:
