@@ -21,7 +21,13 @@ class FakeMutation:
         with self.log.open("a") as log:
             log.write(json.dumps({"event": event, **fields}) + "\n")
 
+    def _fails(self, what: str) -> bool:
+        """A test makes an operation fail by touching ``fail_<what>`` next to the log."""
+        return (self.log.parent / f"fail_{what}").exists()
+
     def add_frame(self, obs: dict, act: dict, task: str) -> None:
+        if self._fails("frame"):
+            raise ValueError("a frame of the wrong shape")
         if self.frames == 0:
             cameras = {key: list(value.shape) for key, value in obs.items() if hasattr(value, "shape")}
             joints = {key: value for key, value in obs.items() if not hasattr(value, "shape")}
@@ -29,10 +35,14 @@ class FakeMutation:
         self.frames += 1
 
     def save_episode(self) -> None:
+        if self._fails("save"):
+            raise OSError("the disk is full")
         self._write("save", frames=self.frames)
         self.frames = 0
 
     def discard_buffer(self) -> None:
+        if self._fails("discard"):
+            raise OSError("the episode's files are gone")
         self._write("discard", frames=self.frames)
         self.frames = 0
 
