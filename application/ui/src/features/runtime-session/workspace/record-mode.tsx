@@ -6,7 +6,7 @@ import { $api } from '../../../api/client';
 import { SchemaSessionDataset } from '../../../api/openapi-spec';
 import { formatKeyCombo, getEffectiveBindings } from '../../hotkeys/key-combo';
 import { useHotkey } from '../../hotkeys/use-hotkey';
-import { RelativeTeleop, TeleopSwitch } from '../cells/robot-cell';
+import { RelativeTeleop, TELEOP_CONTROL, TeleopSwitch } from '../cells/robot-cell';
 import { ERROR_TOAST, failureOf, useRuntimeSession } from '../runtime-session-provider';
 
 import classes from './record-mode.module.css';
@@ -108,7 +108,7 @@ const RecordingRate = ({ dataset }: { dataset: SchemaSessionDataset }) => {
 
 /** Record mode's side bar: teleoperation, the task, and start / accept / discard with their hotkeys. */
 export const RecordMode = () => {
-    const { state, statuses } = useRuntimeSession();
+    const { state, statuses, send } = useRuntimeSession();
     const dataset = state?.dataset ?? undefined;
     const defaultTask = useDefaultTask(dataset?.dataset_id);
     const [task, setTask] = useState(defaultTask);
@@ -130,8 +130,29 @@ export const RecordMode = () => {
     const start = () => void run({ command: 'start_episode', task });
     const save = () => void run({ command: 'save_episode' });
     const discard = () => void run({ command: 'discard_episode' });
+    const teleoperate = async (on: boolean) => {
+        const ack = await send({ command: 'set_control', control: on ? TELEOP_CONTROL : null });
+        if (!ack.ok) {
+            toast.negative(ack.error?.message ?? 'Could not switch teleoperation.', ERROR_TOAST);
+        }
+    };
 
-    useHotkey(bindings['recording.start_episode'], start, canRecord && !isRecording && task !== '');
+    // Before recording, the first press starts teleop; with the same key, the next starts the episode.
+    const canTeleoperate =
+        state?.environment?.leader_id != null &&
+        failureOf(statuses, 'environment') === null &&
+        state.control?.type !== 'teleop' &&
+        !isRecording;
+    const teleopFirst = canTeleoperate && bindings['recording.teleoperate'] === bindings['recording.start_episode'];
+
+    useHotkey(bindings['recording.teleoperate'], () => void teleoperate(true), canTeleoperate);
+    // Shares the discard key by default, which only discards while recording.
+    useHotkey(
+        bindings['recording.stop_teleoperation'],
+        () => void teleoperate(false),
+        state?.control?.type === 'teleop' && !isRecording
+    );
+    useHotkey(bindings['recording.start_episode'], start, canRecord && !isRecording && task !== '' && !teleopFirst);
     useHotkey(bindings['recording.accept_episode'], save, canRecord && isRecording);
     useHotkey(bindings['recording.discard_episode'], discard, canRecord && isRecording);
 
