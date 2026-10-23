@@ -119,6 +119,32 @@ async def test_a_failed_connect_loads_the_environment_failed_to_reload(
     await session.stop()
 
 
+async def test_an_unplugged_leader_leaves_the_environment_running_without_teleop(
+    new_session, registry, robot_factory, tmp_path
+) -> None:
+    from schemas.runtime_session import TeleopControlConfig
+    from tests.workers.fake_robot import FakeRobot
+
+    async def build(robot, _port_finder):
+        connect = robot.id == LEADER_ID
+        return FakeRobot(str(tmp_path / f"{robot.id}"), ["shoulder_pan"], [0.0], fail_connect=connect), object()
+
+    robot_factory.build_robot_driver.side_effect = build
+    session = await new_session()
+    statuses = subscribe_statuses(session)
+    await session.load_environment(make_environment(cameras=0))
+    leader = await next_status(statuses, "environment/leader", within=1)
+    assert leader.state == "failed" and "Failed to open serial port" in leader.error
+    with pytest.raises(TimeoutError):  # the environment does not fail with it
+        await next_status(statuses, "environment", within=1)
+    assert session.environment is not None and session.leader is None
+    try:
+        with pytest.raises(ValueError, match="connected leader arm"):
+            await session.set_control(TeleopControlConfig())
+    finally:
+        await session.stop()
+
+
 async def test_a_dead_worker_fails_the_environment_until_it_is_loaded_again(
     new_session, registry, fake_cameras
 ) -> None:
