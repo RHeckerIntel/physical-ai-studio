@@ -17,7 +17,7 @@ loses the dataset, so the parent waits long for it (``stop_timeout_s``).
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +39,8 @@ if TYPE_CHECKING:
 
 STATUS = "rpc/dataset/status"
 EVENTS = "evt/dataset"
+MIN_EPISODE_FRAMES = 2
+"""lerobot's streaming encoder gives a 1-frame episode no video stats; it saves, then closing the dataset fails."""
 
 
 class Empty(BaseModel):
@@ -62,6 +64,8 @@ class Recorder:
     task: str | None = None
     episodes_recorded: int = 0
     skipped: int = 0
+    frames: int = 0
+    """In the open episode."""
     _open: bool = field(default=False, repr=False)
 
     def status(self, _request: Empty | None = None) -> RecordingStatus:
@@ -72,24 +76,33 @@ class Recorder:
             raise RuntimeSessionCommandError("An episode is already being recorded.", error_code="episode_open")
         if not request.task:
             raise RuntimeSessionCommandError("A task is required to record an episode.", error_code="task_required")
-        self.task, self._open = request.task, True
+        self.task, self._open, self.frames = request.task, True, 0
         return self._changed()
 
     def save(self, _request: SaveEpisodeCommand) -> RecordingStatus:
         if not self._open:
             raise RuntimeSessionCommandError("No episode is being recorded.", error_code="no_episode")
-        # Closed first: if the write fails, the frames stay buffered for a discard, not for more appends.
         self._open = False
+        if self.frames < MIN_EPISODE_FRAMES:
+            self.discard()
+            raise RuntimeSessionCommandError(
+                f"The episode has {self.frames} frame(s), too short to save; it was discarded.",
+                error_code="episode_too_short",
+            )
         try:
             self.mutation.save_episode()
         except Exception:
+            # lerobot consumes its buffer as it saves: a failed save can't be retried, and the next
+            # episode would append to the remains. Clear it, so only this episode is lost.
+            with suppress(Exception):
+                self.mutation.discard_buffer()
             self._changed()  # not recording any more, whether or not the save landed
             raise
         self.episodes_recorded += 1
         return self._changed()
 
     def discard(self, _request: DiscardEpisodeCommand | None = None) -> RecordingStatus:
-        # Also how a failed save is cleared, so it does not require an open episode.
+        # Does not require an open episode: also how a too-short one is thrown away.
         self._open = False
         self.mutation.discard_buffer()
         return self._changed()
@@ -111,13 +124,29 @@ class Recorder:
             return
         observation: dict[str, Any] = dict(zip(state.names, map(float, state.value), strict=True))
         observation.update({key: frame.value for key, frame in frames.items() if frame is not None})
-        self.mutation.add_frame(observation, dict(zip(action.names, map(float, action.value), strict=True)), self.task)
+        try:
+            self.mutation.add_frame(
+                observation, dict(zip(action.names, map(float, action.value), strict=True)), self.task
+            )
+        except Exception:
+            # Lose this episode, not the worker: a crash would end the recording without finalizing it.
+            logger.exception("Recording a frame failed; discarding the episode")
+            with suppress(Exception):
+                self.discard()
+            self._open = False
+            self._changed()
+            return
+        self.frames += 1
 
     def finish(self) -> None:
         """Discard an open episode, then copy the recording back over the dataset."""
         if self._open:
             logger.warning("Discarding the episode that was still open when recording stopped")
-            self.discard()
+            try:
+                self.discard()
+            except Exception:
+                # Finalizing still saves every episode before it; only the open one is lost.
+                logger.exception("Discarding the open episode failed")
         if self.skipped:
             logger.info("Recording skipped {} ticks without a complete row", self.skipped)
         self.mutation.teardown()
