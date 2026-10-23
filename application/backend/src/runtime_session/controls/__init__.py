@@ -46,6 +46,6 @@ def build_control(
         return ReplayControl(store, episode, config)
     if isinstance(config, TeleopControlConfig):
         if leader is None:
-            raise ValueError("Teleoperation needs a leader arm; this environment has none")
+            raise ValueError("Teleoperation needs a connected leader arm; connect one and reload the environment")
         return TeleopControl(store, leader, config, bus)
     return MoveControl(store, config)

@@ -8,7 +8,8 @@ driver does not touch the device; only ``connect()`` does.
 
 An :class:`Environment` then holds it: the device locks, the follower's
 ``RobotWorker``, a ``CameraWorker`` per camera and the leader as a plain
-driver, all connected in parallel and released in reverse. They write to the
+driver, all connected in parallel and released in reverse. Only teleop needs the
+leader, so one that fails to connect reports so and leaves the environment running. They write to the
 session's store, which outlives them. It has its own connection to the
 session's bus, where its devices report as ``environment/<device>`` and it
 reports as ``environment``.
@@ -35,7 +36,7 @@ from workers.camera_worker import CameraWorker, camera_image_spec
 from workers.robot_worker import DEFAULT_ROBOT_HZ, RobotRecipe, RobotWorker, claim_robot
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Collection, Mapping
     from contextlib import AbstractAsyncContextManager
 
     from physicalai.robot import Robot
@@ -225,7 +226,7 @@ class Environment:
                     )
                 if description.leader is not None:
                     managers["leader"] = _connected_driver(description.leader)
-                started = await _enter_concurrently(stack, self.bus, managers)
+                started = await _enter_concurrently(stack, self.bus, managers, optional=_OPTIONAL)
             except Exception as error:
                 publish_status(self.bus, COMPONENT, "failed", _reason(error))
                 raise
@@ -247,9 +248,15 @@ class Environment:
             status = await devices.next()
             if status.state == "failed":
                 device = status.component.removeprefix(f"{COMPONENT}/")
+                if device in _OPTIONAL:
+                    continue
                 logger.error("Environment {!r}: {} failed: {}", self.description.name, device, status.error)
                 publish_status(self.bus, COMPONENT, "failed", f"{device}: {status.error}")
                 return
+
+
+_OPTIONAL = frozenset({"leader"})
+"""Devices the environment runs without; ``leader`` stays ``None`` until a reload connects it."""
 
 
 def _reason(error: Exception) -> str:
@@ -273,9 +280,15 @@ async def _connected_driver(recipe: RobotRecipe) -> AsyncIterator[Robot]:
 
 
 async def _enter_concurrently(
-    stack: AsyncExitStack, bus: Bus, devices: Mapping[str, AbstractAsyncContextManager[Any]]
+    stack: AsyncExitStack,
+    bus: Bus,
+    devices: Mapping[str, AbstractAsyncContextManager[Any]],
+    optional: Collection[str] = (),
 ) -> dict[str, Any]:
-    """Enter every device at once, reporting each; on a failure, exit those that started and raise the first error."""
+    """Enter every device at once, reporting each; on a failure, exit those that started and raise the first error.
+
+    An ``optional`` device that fails is reported and left out, as ``None``.
+    """
     for name in devices:
         publish_status(bus, f"{COMPONENT}/{name}", "starting")
     results = await asyncio.gather(*(device.__aenter__() for device in devices.values()), return_exceptions=True)
@@ -285,7 +298,14 @@ async def _enter_concurrently(
         elif not isinstance(result, BaseException):
             stack.push_async_exit(device)
             publish_status(bus, f"{COMPONENT}/{name}", "running")
-    errors = [result for result in results if isinstance(result, BaseException)]
+    errors = [
+        result
+        for name, result in zip(devices, results, strict=True)
+        if isinstance(result, BaseException) and not (name in optional and isinstance(result, Exception))
+    ]
     if errors:
         raise errors[0]
-    return dict(zip(devices, results, strict=True))
+    return {
+        name: None if isinstance(result, BaseException) else result
+        for name, result in zip(devices, results, strict=True)
+    }

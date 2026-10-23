@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # No session is live yet, so any session block in shared memory is left over from a crash.
     sweep_stale_blocks()
     app_scheduler = Scheduler()
-    await app_scheduler.start_workers()
+    app_scheduler.start_workers()
 
     app.state.scheduler = app_scheduler
     app.state.event_processor = EventProcessor(app_scheduler.event_queue)
@@ -132,7 +132,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # For now, we assume active workers unregistering will trigger releases.
 
     await app.state.runtime_session_registry.close_all()
-    await app_scheduler.shutdown()
+    # Keep draining worker events while shutdown waits for child processes to exit.
+    await asyncio.to_thread(app_scheduler.shutdown)
     app.state.event_processor.shutdown()
     logger.info("Application shutdown completed")
 

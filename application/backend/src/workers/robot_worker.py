@@ -55,7 +55,7 @@ class RobotRecipe:
         return cls(
             robot_id=robot_id,
             driver=Config.from_instance(driver).to_dict(),
-            joint_names=tuple(feature_names(list(driver.joint_names), include_velocities=False)),
+            joint_names=tuple(feature_names(list(driver.joint_names))),
             device_ids=tuple(driver.device_ids),
         )
 
@@ -149,7 +149,7 @@ class RobotWorker(ProcessWorker["Robot"]):
 
     def _check_joint_order(self, driver: Robot) -> None:
         """The store's vectors follow the spec's order; a different robot would get the wrong joints."""
-        connected = tuple(feature_names(list(driver.joint_names), include_velocities=False))
+        connected = tuple(feature_names(list(driver.joint_names)))
         if connected != self.spec.joint_names:
             raise RuntimeError(f"Robot reports joints {connected}, the session expects {self.spec.joint_names}")
 

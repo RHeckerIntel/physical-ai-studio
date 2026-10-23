@@ -37,7 +37,7 @@ class TeleopControl(Control):
     """
 
     def __init__(self, store: Store, leader: Robot, config: TeleopControlConfig, bus: Bus | None = None) -> None:
-        leader_joints = tuple(feature_names(list(leader.joint_names), include_velocities=False))
+        leader_joints = tuple(feature_names(list(leader.joint_names)))
         if leader_joints != store.spec.joint_names:
             raise ValueError(
                 f"The leader's joints {leader_joints} do not match the follower's {store.spec.joint_names}"

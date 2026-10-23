@@ -12,19 +12,17 @@ class FakeObservation:
     sensor_data: dict[str, np.ndarray] | None = None
 
 
-def test_feature_names_and_observation_values_have_the_same_order() -> None:
+def test_feature_names_and_observation_values_are_joint_positions() -> None:
     observation = FakeObservation(
         joint_positions=np.array([1, 2]),
         timestamp=1,
         sensor_data={"velocities": np.array([3, 4])},
     )
 
-    assert feature_names(["a", "b"], include_velocities=True) == ["a.pos", "b.pos", "a.vel", "b.vel"]
-    assert observation_to_dict(["a", "b"], observation, include_velocities=True) == {
+    assert feature_names(["a", "b"]) == ["a.pos", "b.pos"]
+    assert observation_to_dict(["a", "b"], observation) == {
         "a.pos": 1.0,
         "b.pos": 2.0,
-        "a.vel": 3.0,
-        "b.vel": 4.0,
     }
 
 
