@@ -94,7 +94,7 @@ What runs where follows from one rule: **anything that holds hardware or holds t
 
 The session holds four optional parts, each in a `Slot` (`runtime_session/slot.py`): the **environment**, the **dataset**, the **model** and the **control**. A part is an async context manager, so loading enters it and unloading leaves it, and every part is acquired and released the same way. The session is the only thing that loads and unloads them, under one lock.
 
-- **The environment** (`runtime_session/environment.py`) claims the devices, then connects the follower's `RobotWorker`, a `CameraWorker` per camera and the leader as a plain driver, **in parallel**. If any of them fails, what already connected is released. Its devices report as `environment/<device>`.
+- **The environment** (`runtime_session/environment.py`) claims the devices, then connects the follower's `RobotWorker`, a `CameraWorker` per camera and the leader as a plain driver, **in parallel**. If any of them fails, what already connected is released, except for the leader: only teleop needs it, so a leader that fails to connect reports so and the environment runs without it until a reload. Its devices report as `environment/<device>`.
 - **The dataset** (`runtime_session/dataset.py`) is a `Recording`: a `DatasetWorker` that records from the store into the dataset's recording mutation, a copy in the cache.
 - **The model** (`runtime_session/model.py`) is a `ProcessModel`, see [Models](#models).
 - **The control** borrows the others and writes `action`, see [Controls](#controls).

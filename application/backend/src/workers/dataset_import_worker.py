@@ -21,7 +21,6 @@ from services.dataset_import.adapters import (
     get_registered_dataset_import_adapters,
     select_dataset_import_adapter,
 )
-from services.dataset_import.service import DatasetImportService
 from services.dataset_import.staging import resolve_payload_archive_path
 from services.dataset_service import DatasetService
 from services.event_processor import EventType
@@ -32,26 +31,32 @@ from workers.base import ProcessWorker
 
 if TYPE_CHECKING:
     import multiprocessing as mp
+    from multiprocessing.synchronize import Event as EventClass
     from pathlib import Path
     from uuid import UUID
 
 
 class DatasetImportWorker(ProcessWorker[None]):
-    def __init__(self, event_queue: mp.Queue):
+    def __init__(self, job_id: UUID, stop_event: EventClass, event_queue: mp.Queue):
         # Not a daemon, as before: an import may start processes of its own.
-        super().__init__(name="DatasetImportWorker", daemon=False)
+        super().__init__(name=f"DatasetImportWorker-{job_id}", daemon=False)
+        self.job_id = job_id
+        self.shutdown_event = stop_event
         self.queue = event_queue
         self.adapters: list[DatasetImportAdapter] = get_registered_dataset_import_adapters()
 
-    async def run_loop(self, context: None) -> None:  # noqa: ARG002
-        logger.info("Dataset Import Worker is running")
-        while not self.should_stop():
-            async with get_async_db_session_ctx() as session:
-                job = await DatasetImportService(session).claim_pending_dataset_import_job()
-            if isinstance(job, DatasetImportJob):
-                await self._process_job(job)
+    def should_stop(self) -> bool:
+        """Stop on the worker's own stop or the scheduler's shutdown."""
+        return super().should_stop() or self.shutdown_event.is_set()
 
-            await self.sleep(0.5)
+    async def run_loop(self, context: None = None) -> None:  # noqa: ARG002
+        """Execute one claimed import step, then exit (including before user review)."""
+        if self.should_stop():
+            return
+        async with get_async_db_session_ctx() as session:
+            job = await JobService(session).get_job_by_id(self.job_id)
+        if isinstance(job, DatasetImportJob) and job.status == JobStatus.RUNNING:
+            await self._process_job(job)
 
     async def _process_job(self, job: DatasetImportJob) -> None:
         with job_logging_ctx(job_id=str(job.id)):

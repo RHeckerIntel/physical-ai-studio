@@ -12,7 +12,7 @@ from core.security import get_ssh_feature_availability
 from db import get_async_db_session_ctx
 from runtime_session.registry import RuntimeSessionRegistry
 from runtime_session.store import sweep_stale_blocks
-from schemas.remote_trainer import RemoteTrainerConnectionMode
+from schemas.remote_trainer import SshConnection
 from services import remote_trainer_tunnel_manager
 from services.camera_claims import CameraClaimRegistry
 from services.event_processor import EventProcessor
@@ -61,7 +61,7 @@ async def _start_remote_trainer_tunnels() -> None:
         await remote_trainer_tunnel_manager.start_all(remote_trainers)
         if get_ssh_feature_availability().active:
             for trainer in remote_trainers:
-                if trainer.connection_mode is RemoteTrainerConnectionMode.SSH:
+                if isinstance(trainer.connection, SshConnection):
                     RemoteTrainerService._start_persistent_trainer_in_background(trainer, None)
     except Exception:
         logger.exception("Failed to start configured remote-trainer SSH tunnels")
@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # No session is live yet, so any session block in shared memory is left over from a crash.
     sweep_stale_blocks()
     app_scheduler = Scheduler()
-    await app_scheduler.start_workers()
+    app_scheduler.start_workers()
 
     app.state.scheduler = app_scheduler
     app.state.event_processor = EventProcessor(app_scheduler.event_queue)
@@ -132,7 +132,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # For now, we assume active workers unregistering will trigger releases.
 
     await app.state.runtime_session_registry.close_all()
-    await app_scheduler.shutdown()
+    # Keep draining worker events while shutdown waits for child processes to exit.
+    await asyncio.to_thread(app_scheduler.shutdown)
     app.state.event_processor.shutdown()
     logger.info("Application shutdown completed")
 
