@@ -1,7 +1,6 @@
 import asyncio
 import multiprocessing as mp
 from collections.abc import Awaitable, Callable, Collection
-from multiprocessing.synchronize import Event
 from queue import Empty
 from uuid import UUID
 
@@ -12,10 +11,10 @@ from schemas.base_job import JobStatus, JobType
 from schemas.job import RemoteTrainJobPayload, TrainingTarget
 from services.event_processor import EventType
 from services.job_service import JobService
-from workers.base import BaseThreadWorker
+from workers.base import ThreadWorker
 
 
-class TrainingTrackingDispatcher(BaseThreadWorker):
+class TrainingTrackingDispatcher(ThreadWorker[None]):
     """Forward progress updates to the job store and event stream off the hot path.
 
     Backends call :meth:`report` (a `ProgressReporter`) from the training thread
@@ -27,18 +26,16 @@ class TrainingTrackingDispatcher(BaseThreadWorker):
         self,
         job_id: UUID,
         event_queue: mp.Queue,
-        interrupt_event: Event,
         update_progress: Callable[[UUID, int, str | None, dict | None], Awaitable[Job]],
     ):
-        super().__init__(stop_event=interrupt_event)
+        super().__init__(name=f"TrainingTrackingDispatcher-{job_id}")
         self.job_id = job_id
         self.event_queue = event_queue
         self.queue: mp.Queue = mp.Queue()
-        self.interrupt_event = interrupt_event
         self.update_progress = update_progress
 
-    async def run_loop(self) -> None:
-        while not self.interrupt_event.is_set():
+    async def run_loop(self, context: None) -> None:  # noqa: ARG002
+        while not self.should_stop():
             if not await self._drain_one():
                 await asyncio.sleep(0.05)
         while await self._drain_one():
@@ -72,11 +69,13 @@ class TrainingService:
     """
 
     @staticmethod
-    async def abort_orphan_jobs(job_service: JobService, *, exclude_job_ids: Collection[UUID] | None = None) -> None:
+    async def abort_orphan_jobs(
+        job_service: JobService, *, exclude_job_ids: Collection[UUID] | None = None
+    ) -> list[Job]:
         """
         Reconcile RUNNING training jobs left behind by a previous process.
 
-        Called on training-worker setup and teardown. Remote trainers run
+        Called by the scheduler on startup, worker exit, and shutdown. Remote trainers run
         independently of Studio, so a RUNNING job that
         already recorded its ``remote_job_id`` is requeued (back to PENDING) to
         reattach and mirror progress on the next pickup -- this is what lets a run
@@ -86,7 +85,11 @@ class TrainingService:
         Args:
             job_service: Used to list and update RUNNING training jobs.
             exclude_job_ids: Job ids already handled by another recovery pass.
+
+        Returns:
+            Updated jobs for the caller to publish to subscribed clients.
         """
+        reconciled: list[Job] = []
         excluded = frozenset(exclude_job_ids) if exclude_job_ids is not None else frozenset()
         query = {"status": JobStatus.RUNNING, "type": JobType.TRAINING}
         running_jobs = await job_service.get_job_list(extra_filters=query)
@@ -100,18 +103,21 @@ class TrainingService:
                     job.id,
                     remote_job_id,
                 )
-                await job_service.update_job_status(
+                updated_job = await job_service.update_job_status(
                     job_id=job.id,
                     status=JobStatus.PENDING,
                     message="Reconnecting to remote training job after restart",
                 )
+                reconciled.append(updated_job)
                 continue
             logger.warning(f"Aborting orphan training job with id: {job.id}")
-            await job_service.update_job_status(
+            updated_job = await job_service.update_job_status(
                 job_id=job.id,
                 status=JobStatus.FAILED,
                 message="Job aborted due to application shutdown",
             )
+            reconciled.append(updated_job)
+        return reconciled
 
     # Targets whose trainer keeps running independently of the studio process,
     # and so can be reattached to after a restart via their remote_job_id.
