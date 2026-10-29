@@ -153,9 +153,7 @@ export const router = createBrowserRouter([
                         element: (
                             <Grid
                                 areas={['header', 'content']}
-                                UNSAFE_style={{
-                                    gridTemplateRows: `min-content ${minmax(0, '1fr')}`,
-                                }}
+                                rows={['min-content', minmax(0, '1fr')]}
                                 minHeight={0}
                                 height={'100%'}
                             >
