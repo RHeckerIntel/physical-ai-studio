@@ -21,11 +21,17 @@ interface WorkspaceMode {
     panel: ReactNode;
 }
 
-export type ModeKey = 'record' | 'inference';
+export type ModeKey = 'record' | 'inference' | 'hil';
 
 const MODES: WorkspaceMode[] = [
     { key: 'record', label: 'Record', needs: ['environment', 'dataset'], panel: <RecordMode /> },
     { key: 'inference', label: 'Inference', needs: ['environment', 'model'], panel: <InferenceMode /> },
+    {
+        key: 'hil',
+        label: 'Human in the loop',
+        needs: ['environment', 'model', 'dataset'],
+        panel: <InferenceMode humanInTheLoop />,
+    },
 ];
 
 const ARTICLE: Record<SessionPartName, string> = {

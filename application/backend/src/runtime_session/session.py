@@ -52,6 +52,7 @@ from schemas.runtime_session import (
     CommandDone,
     DiscardEpisodeCommand,
     ErrorMessage,
+    HilControlConfig,
     LoadDatasetCommand,
     LoadEnvironmentCommand,
     LoadModelCommand,
@@ -554,7 +555,9 @@ class RuntimeSession:
 
     async def _unload_model(self, environment: Environment) -> None:
         """Hold the lock. A control driving the follower with the model holds it first."""
-        if (control := self._control.value) is not None and isinstance(control.config, ModelControlConfig):
+        if (control := self._control.value) is not None and isinstance(
+            control.config, ModelControlConfig | HilControlConfig
+        ):
             await self._switch_control(environment, None)
         await self._model.unload()
 

@@ -21,17 +21,20 @@ import {
     SchemaEnvironmentDraft,
     SchemaEnvironmentWithRelations,
     SchemaErrorMessage,
+    SchemaInterruptCommand,
     SchemaLoadDatasetCommand,
     SchemaLoadEnvironmentCommand,
     SchemaLoadModelCommand,
     SchemaObservationMessage,
     SchemaReloadEnvironmentCommand,
+    SchemaResumeCommand,
     SchemaSaveEpisodeCommand,
     SchemaSessionState,
     SchemaSetControlCommand,
     SchemaStartEpisodeCommand,
     SchemaStateMessage,
     SchemaStatusMessage,
+    SchemaTakeOverCommand,
     SchemaUnloadDatasetCommand,
     SchemaUnloadEnvironmentCommand,
     SchemaUnloadModelCommand,
@@ -55,7 +58,10 @@ type Command =
     | Omit<SchemaUnloadModelCommand, 'request_id'>
     | Omit<SchemaStartEpisodeCommand, 'request_id'>
     | Omit<SchemaSaveEpisodeCommand, 'request_id'>
-    | Omit<SchemaDiscardEpisodeCommand, 'request_id'>;
+    | Omit<SchemaDiscardEpisodeCommand, 'request_id'>
+    | Omit<SchemaInterruptCommand, 'request_id'>
+    | Omit<SchemaTakeOverCommand, 'request_id'>
+    | Omit<SchemaResumeCommand, 'request_id'>;
 
 /** A model export to load: which model, and the backend and device it runs on. */
 export type SessionModelToLoad = Omit<SchemaLoadModelCommand, 'request_id' | 'command'>;

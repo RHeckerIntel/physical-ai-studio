@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 
-import { Button, Flex, Item, Picker, Slider, TextArea, toast } from '@geti-ui/ui';
+import { Button, Flex, Item, Picker, Slider, Text, TextArea, toast } from '@geti-ui/ui';
 
 import { $api } from '../../../api/client';
-import { SchemaExecutionConfig, SchemaModelControlConfig } from '../../../api/openapi-spec';
+import { SchemaExecutionConfig, SchemaHilControlConfig, SchemaModelControlConfig } from '../../../api/openapi-spec';
 import { ERROR_TOAST, failureOf, useRuntimeSession } from '../runtime-session-provider';
 
 const EXECUTION_MODES: { key: SchemaExecutionConfig['mode']; label: string }[] = [
@@ -29,8 +29,26 @@ const useDefaultTask = (model_id: string | undefined) => {
     return dataset?.default_task ?? '';
 };
 
-/** Inference mode's side bar: the task, the action rate and how chunks are requested, then play / stop. */
-export const InferenceMode = () => {
+type Command = 'interrupt' | 'take_over' | 'resume';
+
+/** What the human can do in each phase of a human-in-the-loop control. */
+const PHASES: Record<SchemaHilControlConfig['phase'], { hint: string; actions: [Command, string][] }> = {
+    inference: { hint: 'The model drives the follower.', actions: [['interrupt', 'Interrupt']] },
+    interrupted: {
+        hint: 'The follower holds and the leader moves to it. Then take over to record a correction.',
+        actions: [
+            ['take_over', 'Take over'],
+            ['resume', 'Resume without recording'],
+        ],
+    },
+    teleop: { hint: 'You drive the follower; the episode is recording.', actions: [['resume', 'Save and resume']] },
+};
+
+/**
+ * Inference mode's side bar: the task, the action rate and how chunks are requested, then play / stop.
+ * With ``humanInTheLoop`` the model runs until interrupted, and the human can take over and record.
+ */
+export const InferenceMode = ({ humanInTheLoop = false }: { humanInTheLoop?: boolean }) => {
     const { state, statuses, send } = useRuntimeSession();
     const defaultTask = useDefaultTask(state?.model?.model_id);
     const [task, setTask] = useState(defaultTask);
@@ -42,34 +60,44 @@ export const InferenceMode = () => {
 
     useEffect(() => setTask(defaultTask), [defaultTask]);
 
-    const isRunning = state?.control?.type === 'model';
+    const control = state?.control;
+    const isRunning = control?.type === (humanInTheLoop ? 'hil' : 'model');
     const canRun =
         state?.environment != null &&
         failureOf(statuses, 'environment') === null &&
         state.model != null &&
         failureOf(statuses, 'model') === null;
 
-    const setControl = async (control: SchemaModelControlConfig | null) => {
+    const run = async (command: Parameters<typeof send>[0], failure: string) => {
         setIsPending(true);
         try {
-            const ack = await send({ command: 'set_control', control });
+            const ack = await send(command);
             if (!ack.ok) {
-                toast.negative(ack.error?.message ?? 'Could not run the model.', ERROR_TOAST);
+                toast.negative(ack.error?.message ?? failure, ERROR_TOAST);
             }
         } finally {
             setIsPending(false);
         }
     };
 
-    const play = () =>
-        void setControl({
+    const setControl = (next: SchemaModelControlConfig | SchemaHilControlConfig | null) =>
+        void run({ command: 'set_control', control: next }, 'Could not run the model.');
+
+    const play = () => {
+        const model: SchemaModelControlConfig = {
             type: 'model',
             task,
             hz,
             execution: { mode, request_threshold: threshold },
             // The follower eases onto the model's actions, which may start far from where it is.
             grace_s: 3,
-        });
+        };
+        setControl(
+            humanInTheLoop ? { type: 'hil', model, leader_align_s: 2, takeover_grace_s: 1, phase: 'inference' } : model
+        );
+    };
+
+    const phase = control?.type === 'hil' ? PHASES[control.phase] : null;
 
     return (
         <Flex direction='column' gap='size-200'>
@@ -106,8 +134,22 @@ export const InferenceMode = () => {
                 formatOptions={{ style: 'percent' }}
                 isDisabled={isRunning}
             />
+            {isRunning && phase !== null && (
+                <>
+                    <Text>{phase.hint}</Text>
+                    {phase.actions.map(([command, label]) => (
+                        <Button
+                            key={command}
+                            isPending={isPending}
+                            onPress={() => void run({ command }, `Could not ${label.toLowerCase()}.`)}
+                        >
+                            {label}
+                        </Button>
+                    ))}
+                </>
+            )}
             {isRunning ? (
-                <Button variant='secondary' isPending={isPending} onPress={() => void setControl(null)}>
+                <Button variant='secondary' isPending={isPending} onPress={() => setControl(null)}>
                     Stop
                 </Button>
             ) : (

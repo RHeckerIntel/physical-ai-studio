@@ -67,7 +67,31 @@ class ModelControlConfig(BaseModel):
     )
 
 
-ControlConfig = Annotated[TeleopControlConfig | ModelControlConfig, Field(discriminator="type")]
+HilPhase = Literal["inference", "interrupted", "teleop"]
+
+
+class HilControlConfig(BaseModel):
+    """Drive the follower with the loaded model, until a human interrupts and takes over with the leader.
+
+    ``interrupt`` holds the follower and moves the leader to it; ``take_over``
+    then teleoperates and records an episode into the loaded dataset; ``resume`` saves it and
+    runs the model again. ``resume`` while interrupted runs the model again without recording.
+    """
+
+    type: Literal["hil"] = "hil"
+    model: ModelControlConfig
+    """How the model runs; its ``task`` is also the recorded episodes' task, and its ``hz`` the teleop rate."""
+    leader_align_s: float = Field(
+        2, gt=0, le=30, description="On interrupt, the leader moves to the follower over this long, if it can be driven"
+    )
+    takeover_grace_s: float = Field(
+        1, ge=0, le=30, description="On take over, the follower closes the gap to the leader over this long"
+    )
+    phase: HilPhase = "inference"
+    """Where the control is; it always starts in ``inference``, and only its commands change it."""
+
+
+ControlConfig = Annotated[TeleopControlConfig | ModelControlConfig | HilControlConfig, Field(discriminator="type")]
 
 
 class LoadEnvironmentCommand(BaseModel):
@@ -147,6 +171,27 @@ class DiscardEpisodeCommand(BaseModel):
     request_id: str
 
 
+class InterruptCommand(BaseModel):
+    """Human in the loop: stop the model and hold the follower, for the leader to be brought to it."""
+
+    command: Literal["interrupt"] = "interrupt"
+    request_id: str
+
+
+class TakeOverCommand(BaseModel):
+    """Human in the loop: teleoperate from the leader, recording an episode."""
+
+    command: Literal["take_over"] = "take_over"
+    request_id: str
+
+
+class ResumeCommand(BaseModel):
+    """Human in the loop: save the episode taken over, if any, and run the model again."""
+
+    command: Literal["resume"] = "resume"
+    request_id: str
+
+
 class SetControlCommand(BaseModel):
     """Switch what drives the follower. ``null`` holds it where it is."""
 
@@ -166,7 +211,10 @@ RuntimeSessionCommand = Annotated[
     | UnloadModelCommand
     | StartEpisodeCommand
     | SaveEpisodeCommand
-    | DiscardEpisodeCommand,
+    | DiscardEpisodeCommand
+    | InterruptCommand
+    | TakeOverCommand
+    | ResumeCommand,
     Field(discriminator="command"),
 ]
 
