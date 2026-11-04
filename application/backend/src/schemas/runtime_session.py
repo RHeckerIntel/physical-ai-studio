@@ -82,7 +82,10 @@ class HilControlConfig(BaseModel):
     model: ModelControlConfig
     """How the model runs; its ``task`` is also the recorded episodes' task, and its ``hz`` the teleop rate."""
     leader_align_s: float = Field(
-        2, gt=0, le=30, description="On interrupt, the leader moves to the follower over this long, if it can be driven"
+        2,
+        gt=0,
+        le=30,
+        description="On interrupt, a leader that can switch its torque on moves to the follower over this long",
     )
     takeover_grace_s: float = Field(
         1, ge=0, le=30, description="On take over, the follower closes the gap to the leader over this long"

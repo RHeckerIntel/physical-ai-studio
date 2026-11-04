@@ -60,3 +60,17 @@ class FakeRobot:
 
 def sent_actions(log: Path) -> list[dict]:
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+class FakeTorqueRobot(FakeRobot):
+    """A :class:`FakeRobot` that can switch its torque, as ``TorqueControllable`` leaders do; free at first."""
+
+    torque = False
+
+    def set_torque(self, *, enabled: bool) -> None:
+        self.torque = enabled
+
+    def send_action(self, action: np.ndarray, *, goal_time: float = 0.1) -> None:
+        if not self.torque:
+            raise RuntimeError("Cannot send actions with torque off")
+        super().send_action(action, goal_time=goal_time)

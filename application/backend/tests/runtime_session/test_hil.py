@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 from runtime_session.bus import BusRequestError, command_key
@@ -20,8 +20,9 @@ from schemas.runtime_session import (
 )
 from tests.workers.fake_dataset import FakeDatasetWorker
 from tests.workers.fake_model import FakeModelWorker
+from tests.workers.fake_robot import FakeRobot, FakeTorqueRobot, sent_actions
 
-from .fixtures import make_environment
+from .fixtures import JOINTS, LEADER_ID, make_environment
 from .test_model import _model, _until
 from .test_recording import _dataset
 
@@ -108,38 +109,31 @@ async def test_hil_needs_a_leader(new_session, fake_cameras, fake_model_worker, 
         await session.stop()
 
 
-class _TrossenSdk:
-    """Records what the leader's SDK is told, posing as the Trossen one."""
+async def test_interrupt_moves_a_torque_leader_to_the_follower(
+    new_session, fake_cameras, fake_model_worker, robot_factory, tmp_path
+) -> None:
+    async def build(robot, _port_finder):
+        if robot.id == LEADER_ID:
+            return FakeTorqueRobot(str(tmp_path / "leader.jsonl"), JOINTS, [30.0, 40.0]), object()
+        return FakeRobot(str(tmp_path / "follower.jsonl"), JOINTS, [1.0, 2.0]), object()
 
-    __module__ = "trossen_arm.trossen_arm"
+    robot_factory.build_robot_driver.side_effect = build
+    session: RuntimeSession = await new_session()
+    await session.load_environment(make_environment())
+    await session.load_model(_model(tmp_path), "torch", "cpu")
+    leader = session.leader
+    assert isinstance(leader, FakeTorqueRobot)
+    try:
+        config = HilControlConfig(model=ModelControlConfig(task="pick", hz=50, grace_s=0), leader_align_s=0.3)
+        await session.set_control(config)
+        await _send(session, InterruptCommand(request_id=""))
+        held = session.store.read(ACTION).value.copy()
+        assert leader.torque
+        # Stepped there over leader_align_s, not sent in one jump.
+        await _until(lambda: np.allclose(leader.get_observation().joint_positions, held))
+        assert len(sent_actions(tmp_path / "leader.jsonl")) > 3
 
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
-
-    def set_all_modes(self, mode) -> None:
-        self.calls.append(("mode", mode))
-
-    def set_all_positions(self, positions, goal_time, blocking) -> None:
-        self.calls.append(("positions", list(positions), goal_time, blocking))
-
-    def set_all_external_efforts(self, efforts, goal_time, blocking) -> None:
-        self.calls.append(("efforts", list(efforts), goal_time, blocking))
-
-
-def test_a_trossen_leader_moves_in_radians_and_is_released() -> None:
-    import numpy as np
-    import trossen_arm
-
-    from runtime_session.controls.leader import move_leader, release_leader
-
-    leader = SimpleNamespace(joint_names=["joint_0", "gripper"], _driver=_TrossenSdk())
-    assert move_leader(leader, np.array([180.0, 0.04]), duration=2.0)  # type: ignore[arg-type]
-    release_leader(leader)  # type: ignore[arg-type]
-    assert leader._driver.calls == [
-        ("mode", trossen_arm.Mode.position),
-        ("positions", [pytest.approx(np.pi), pytest.approx(0.04)], 2.0, False),
-        ("mode", trossen_arm.Mode.external_effort),
-        ("efforts", [0.0, 0.0], 0.0, False),
-    ]
-    # Any other leader is left for the human to bring over.
-    assert not move_leader(SimpleNamespace(joint_names=["joint_0"]), np.array([1.0]), duration=2.0)  # type: ignore[arg-type]
+        await _send(session, ResumeCommand(request_id=""))
+        assert not leader.torque  # free again for the human
+    finally:
+        await session.stop()
