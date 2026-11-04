@@ -180,6 +180,8 @@ robot supports discovery, identification, or online-status checks.
 - `asset`: optional URDF, mesh, and joint-map information.
 - `adapter_options`: optional control and effort-forwarding behavior.
 - `zero_calibration`: optional zero-pose calibration Studio runs when the robot is added.
+- `has_torque`: whether the motors can be torqued (default `True`). Set `False` for
+  read-only leaders whose joints can only be read, never driven.
 
 The `type` value must not be casually renamed. It is stored in project data and
 must remain unique across all installed plugins.

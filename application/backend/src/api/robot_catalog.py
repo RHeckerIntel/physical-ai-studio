@@ -30,6 +30,10 @@ class RobotCatalogDefinitionResponse(BaseModel):
         default=None,
         description="Zero-pose calibration offered when adding this robot type, if any",
     )
+    has_torque: bool = Field(
+        default=True,
+        description="Whether the robot's motors can be torqued; false for read-only leaders",
+    )
 
 
 def _to_response(definition: RobotCatalogDefinition) -> RobotCatalogDefinitionResponse:
@@ -54,6 +58,8 @@ def _to_response(definition: RobotCatalogDefinition) -> RobotCatalogDefinitionRe
             instructions=definition.zero_calibration.instructions,
             zero_tolerance_deg=definition.zero_calibration.zero_tolerance_deg,
         ),
+        # Older SDKs have no ``has_torque``; their robots are all torque capable.
+        has_torque=getattr(definition, "has_torque", True),
     )
 
 
