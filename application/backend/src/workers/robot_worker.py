@@ -174,6 +174,8 @@ class RobotWorker(ProcessWorker["Robot"]):
                     command = observation.joint_positions
                 remaining = action.timestamp - time.monotonic()
                 command = command + (action.value - command) * (tick / remaining) if remaining > tick else action.value
-                context.send_action(command, goal_time=tick)
+
+                # Send larger goal time (tick * 2) for better smoothness since rate isn't consistent exactly.
+                context.send_action(command, goal_time=tick * 2)
             await rate.sleep()
         logger.info("Robot worker {} stopped", self.name)
